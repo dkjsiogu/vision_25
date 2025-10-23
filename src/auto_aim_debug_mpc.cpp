@@ -1,4 +1,5 @@
 #include <fmt/core.h>
+#include <fmt/format.h>
 
 #include <atomic>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include "tools/math_tools.hpp"
 #include "tools/plotter.hpp"
 #include "tools/thread_safe_queue.hpp"
+#include "tools/visualizer_3d.hpp"
 
 using namespace std::chrono_literals;
 
@@ -29,6 +31,7 @@ int main(int argc, char * argv[])
 {
   tools::Exiter exiter;
   tools::Plotter plotter;
+  tools::Visualizer3D visualizer(1200, 800);
 
   cv::CommandLineParser cli(argc, argv, keys);
   auto config_path = cli.get<std::string>(0);
@@ -86,6 +89,20 @@ int main(int argc, char * argv[])
 
       data["fire"] = plan.fire ? 1 : 0;
       data["fired"] = fired ? 1 : 0;
+      const double rad2deg = 57.29577951308232;
+      auto target_pitch_str = plan.control && target.has_value()
+                                ? fmt::format("{:.3f} rad/{:.3f} deg", plan.target_pitch,
+                                               plan.target_pitch * rad2deg)
+                                : "N/A";
+      auto target_yaw_str = plan.control && target.has_value()
+                               ? fmt::format("{:.3f} rad/{:.3f} deg", plan.target_yaw,
+                                              plan.target_yaw * rad2deg)
+                               : "N/A";
+      tools::logger()->info(
+        "[Angles] gimbal yaw {:.3f} rad/{:.3f} deg pitch {:.3f} rad/{:.3f} deg | target yaw {} "
+        "pitch {} | plan yaw {:.3f} rad/{:.3f} deg pitch {:.3f} rad/{:.3f} deg",
+        gs.yaw, gs.yaw * rad2deg, gs.pitch, gs.pitch * rad2deg, target_yaw_str, target_pitch_str,
+        plan.yaw, plan.yaw * rad2deg, plan.pitch, plan.pitch * rad2deg);
 
       if (target.has_value()) {
         data["target_z"] = target->ekf_x()[4];   //z
@@ -110,6 +127,7 @@ int main(int argc, char * argv[])
   while (!exiter.exit()) {
     camera.read(img, t);
     auto q = gimbal.q(t);
+    auto gs = gimbal.state();
 
     solver.set_R_gimbal2world(q);
     auto armors = yolo.detect(img);
@@ -134,6 +152,24 @@ int main(int argc, char * argv[])
       auto image_points =
         solver.reproject_armor(aim_xyza.head(3), aim_xyza[3], target.armor_type, target.name);
       tools::draw_points(img, image_points, {0, 0, 255});
+      
+      // 更新3D可视化
+      auto plan = planner.plan(std::make_optional(target), gs.bullet_speed);
+      Eigen::Vector3d target_xyz_in_world = aim_xyza.head(3);
+      Eigen::Vector3d target_xyz_in_gimbal = solver.R_gimbal2world().transpose() * target_xyz_in_world;
+      
+      visualizer.update(
+        solver.R_camera2gimbal(),
+        solver.t_camera2gimbal(),
+        solver.R_gimbal2world(),
+        target_xyz_in_gimbal,
+        target_xyz_in_world,
+        gs.yaw,
+        gs.pitch,
+        plan.target_yaw,
+        plan.target_pitch
+      );
+      visualizer.show("3D Coordinate System");
     }
 
     cv::resize(img, img, {}, 0.5, 0.5);  // 显示时缩小图片尺寸

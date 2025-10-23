@@ -9,7 +9,7 @@ yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
 device: CPU
 min_confidence: 0.8
-use_traditional: true
+use_traditional: false
 
 #####-----ROI-----#####
 roi: 
@@ -30,7 +30,6 @@ min_armor_ratio: 1
 max_armor_ratio: 5
 max_side_ratio: 1.5
 max_rectangular_error: 25 # degree
-min_confidence: 0.8
 
 #####-----tracker参数-----#####
 min_detect_count: 5
@@ -38,38 +37,48 @@ max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
 
 #####-----aimer参数-----#####
-yaw_offset: -2 # degree -2.5
-pitch_offset: 0 # degree 2
-comming_angle: 60 # degree
+yaw_offset: 2 # degree -2.5
+pitch_offset: 6.5 # degree 2
+comming_angle: 55 # degree
 leaving_angle: 20 # degree
-decision_speed: 8 # rad/s
-high_speed_delay_time: 0.015 # s
-low_speed_delay_time: 0.015 # s
+decision_speed: 7 # rad/s
+high_speed_delay_time: 0.0 # s
+low_speed_delay_time: 0.0 # s planner use this value
 
 #####-----shooter参数-----#####
 first_tolerance: 3 # 近距离射击容差，degree
 second_tolerance: 2 # 远距离射击容差，degree
-judge_distance: 2 #距离判断阈值
+judge_distance: 1 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 
 camera_name: "hikrobot"
-exposure_ms: 2
-gain: 16
+exposure_ms: 2.5
+gain: 16.9
 vid_pid: "2bdf:0001"
 
-#  1  0  0
-#  0  1  0
-#  0  0  1
+# 云台坐标系到IMU body坐标系的旋转矩阵（标定时使用的配置）
+# [0  -1   0]
+# [1   0   0]  
+# [0   0   1]
+R_gimbal2imubody: [0, -1, 0, 1, 0, 0, 0, 0, 1]
 
-R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+# 重投影误差: 0.0258px
+camera_matrix: [1818.877408014708, 0, 720.19836231067984, 0, 1817.443318189514, 546.66232890932292, 0, 0, 1]
+distort_coeffs: [-0.075661688605325572, 0.14810657022076032, -0.00082090724996244317, -4.8675831140386357e-05, 0]
 
-# 重投影误差: 0.3145px
-camera_matrix: [1851.7070167840545, 0, 721.12585328714192, 0, 1851.8175594364079, 571.69879709276688, 0, 0, 1]
-distort_coeffs: [-0.093662536083526302, 0.18945726820633155, -0.00040424349861928674, -0.0040568403852123142, 0]
+# 相机同理想情况的偏角: yaw1.81 pitch-0.05 roll0.69 degree
+R_camera2gimbal: [-0.031512721086445428, -0.00041563639808109054, 0.9995032644549553, -0.99943029519205273, 0.012103537606966253, -0.031505387312694436, -0.01208443056391318, -0.9999266631227417, -0.00079681501279438294]
+t_camera2gimbal: [0.055998359573737438, -0.00382929102242423, 0.30649608351091961]
 
-# 相机同理想情况的偏角: yaw-1.61 pitch-0.82 roll-0.61 degree
-R_camera2gimbal: [0.02823004230930648, -0.014076983590428133, 0.99950232778328707, -0.99954530259354468, -0.010995644138609872, 0.028076393521179785, 0.010594940981141165, -0.99984045444409364, -0.014380990321749998]
-t_camera2gimbal: [0.045517325957791413, 0.10544338092767802, 0.034649710880185793]
+
+
+
+
+
+
+
+
+
 
 #####-----cboard参数-----#####
 quaternion_canid: 0x100
@@ -79,21 +88,25 @@ can_interface: "can0"
 
 #####-----gimbal参数-----#####
 com_port: "/dev/gimbal"
+yaw_kp: 0
+yaw_kd: 0
+pitch_kp: 0
+pitch_kd: 0
 
 #####-----planner-----#####
-fire_thresh: 0.003
+fire_thresh: 0.0035
 
 max_yaw_acc: 50
 Q_yaw: [9e6, 0]
 R_yaw: [1]
 
 max_pitch_acc: 100
-Q_pitch: [9e6,0]
+Q_pitch: [9e6, 0]
 R_pitch: [1]
 
 #####-----buff_detector参数-----#####
 model: "assets/yolo11_buff_int8.xml"
 
 #####-----buff_aimer参数-----#####
-fire_gap_time: 0.520   # s
-predict_time: 0.100     # s
+fire_gap_time: 0.700   # s
+predict_time: 0.120     # s

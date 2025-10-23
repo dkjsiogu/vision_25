@@ -2,6 +2,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <fstream>
+#include <filesystem>
 #include <opencv2/opencv.hpp>
 
 #include "tools/img_tools.hpp"
@@ -27,6 +28,13 @@ void load(
   std::vector<std::vector<cv::Point3f>> & obj_points,
   std::vector<std::vector<cv::Point2f>> & img_points)
 {
+  if (!std::filesystem::exists(input_folder)) {
+    fmt::print(
+      stderr, "[ERROR] 输入文件夹 '{}' 不存在，请检查路径或先采集图片。\n",
+      input_folder);
+    return;
+  }
+
   // 读取yaml参数
   auto yaml = YAML::LoadFile(config_path);
   auto pattern_cols = yaml["pattern_cols"].as<int>();
@@ -100,6 +108,14 @@ int main(int argc, char * argv[])
   std::vector<std::vector<cv::Point3f>> obj_points;
   std::vector<std::vector<cv::Point2f>> img_points;
   load(input_folder, config_path, img_size, obj_points, img_points);
+
+  if (img_points.empty()) {
+    fmt::print(
+      stderr,
+      "[ERROR] 在 '{}' 中没有找到任何可用的标定图像。请确保文件命名为 1.jpg, 2.jpg ... 并且能检测到圆点。\n",
+      input_folder);
+    return 1;
+  }
 
   // 相机标定
   cv::Mat camera_matrix, distort_coeffs;

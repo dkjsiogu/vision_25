@@ -8,10 +8,11 @@ Classifier::Classifier(const std::string & config_path)
 {
   auto yaml = YAML::LoadFile(config_path);
   auto model = yaml["classify_model"].as<std::string>();
+  auto device = yaml["infer_device"] ? yaml["infer_device"].as<std::string>() : "CPU";
   net_ = cv::dnn::readNetFromONNX(model);
   auto ovmodel = core_.read_model(model);
   compiled_model_ = core_.compile_model(
-    ovmodel, "AUTO", ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+    ovmodel, device, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
 }
 
 void Classifier::classify(Armor & armor)

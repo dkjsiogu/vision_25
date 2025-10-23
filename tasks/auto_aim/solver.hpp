@@ -15,6 +15,8 @@ public:
   explicit Solver(const std::string & config_path);
 
   Eigen::Matrix3d R_gimbal2world() const;
+  Eigen::Matrix3d R_camera2gimbal() const { return R_camera2gimbal_; }
+  Eigen::Vector3d t_camera2gimbal() const { return t_camera2gimbal_; }
 
   void set_R_gimbal2world(const Eigen::Quaterniond & q);
 

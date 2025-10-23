@@ -86,7 +86,41 @@ IMU型号：使用C板内置BMI088作为IMU\
     ./build/auto_aim_test
     ```
 
-4. 注册自启：
+4. 运行带3D可视化的调试程序（推荐用于调试坐标系）:
+    ```bash
+    ./build/auto_aim_debug_mpc configs/standard.yaml
+    ```
+    
+    **3D可视化窗口说明**：
+    - **地面网格**：灰色网格表示地平面参考（Z=-0.3m），帮助理解空间位置
+    - **世界坐标系**（白色XYZ轴）：固定在云台中心
+    - **云台**（橙色点 + RGB坐标轴）：显示云台位置和姿态（会随IMU旋转）
+    - **相机**（青色点 + 视锥体）：显示相机位置、朝向和视野
+    - **目标**（黄色点）：显示检测到的目标位置
+    - **参数显示**：
+      - Camera to Gimbal Transform: 相机相对云台的平移（前/右/上）
+      - Gimbal State: 云台当前yaw和pitch角度
+      - Target Position: 目标在云台坐标系和世界坐标系的位置
+      - Target Angles: 瞄准目标需要的yaw和pitch角度
+      - View Control: 当前观察者视角参数
+    - **颜色编码**：红色=X轴，绿色=Y轴，蓝色=Z轴
+    
+    **交互控制**：
+    - 🖱️ **左键拖动**：旋转观察视角（环绕场景）
+      - 水平拖动：改变yaw角度（左右环绕）
+      - 垂直拖动：改变pitch角度（上下俯仰）
+      - 场景中的坐标系和对象保持固定，只改变观察者位置
+    - 🖱️ **右键拖动**：平移视图（移动画面中心）
+    - 🖱️ **滚轮滚动**：缩放视图（放大/缩小）
+    - ⌨️  **按Q键**：退出程序
+    
+    **视角说明**：
+    - 观察者位于一个虚拟的球面上，始终看向原点
+    - 左键拖动相当于沿球面移动观察者位置
+    - 坐标系、云台、相机等对象保持在世界坐标系中的实际位置
+    - 只有云台的姿态会随IMU数据实时变化
+    
+5. 注册自启：
     1. 确保已安装`screen`:
         ```
         sudo apt install screen
@@ -347,5 +381,3 @@ DPS = 单位时间射击窗口占比 \times 射频 \times 单发子弹伤害
 王骁扬、杨佳轩、奚睿豪、俞选涛、吴圳楠、杨瑞灵、程翔宇
 
 
-## Star History
-[![Star History Chart](https://api.star-history.com/svg?repos=TongjiSuperPower/sp_vision_25&type=Date)](https://www.star-history.com/#TongjiSuperPower/sp_vision_25&Date)

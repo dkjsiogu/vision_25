@@ -1,5 +1,5 @@
-# enemy_color: "red"
-enemy_color: "blue"
+enemy_color: "red"
+#enemy_color: "blue"
 
 #####-----神经网络参数-----#####
 yolo_name: yolov5
@@ -7,9 +7,9 @@ classify_model: assets/tiny_resnet.onnx
 yolo11_model_path: assets/yolo11.xml
 yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
-device: GPU
+device: CPU
 min_confidence: 0.8
-use_traditional: false
+use_traditional: true
 
 #####-----ROI-----#####
 roi: 
@@ -18,7 +18,7 @@ roi:
   width: 500
   height: 500
 
-use_roi: false
+use_roi: true
 
 #####-----传统方法参数-----#####
 threshold: 150
