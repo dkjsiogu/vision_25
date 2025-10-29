@@ -48,8 +48,8 @@ YOLOV5::YOLOV5(const std::string & config_path, bool debug)
     .convert_color(ov::preprocess::ColorFormat::RGB)
     .scale(255.0);
 
-  // TODO: ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY)
   model = ppp.build();
+  // 启用LATENCY模式以降低推理延迟
   compiled_model_ = core_.compile_model(
     model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
 }

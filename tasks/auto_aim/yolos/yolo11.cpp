@@ -47,8 +47,8 @@ YOLO11::YOLO11(const std::string & config_path, bool debug)
     .convert_color(ov::preprocess::ColorFormat::RGB)
     .scale(255.0);
 
-  // TODO: ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY)
   model = ppp.build();
+  // 启用LATENCY模式以降低推理延迟
   compiled_model_ = core_.compile_model(
     model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
 }
@@ -61,7 +61,10 @@ std::list<Armor> YOLO11::detect(const cv::Mat & raw_img, int frame_count)
   }
 
   cv::Mat bgr_img;
-  tmp_img_ = raw_img;
+  if (debug_) {
+    tmp_img_ = raw_img.clone();  // 只在debug时才拷贝
+  }
+  
   if (use_roi_) {
     if (roi_.width == -1) {  // -1 表示该维度不裁切
       roi_.width = raw_img.cols;
@@ -69,9 +72,9 @@ std::list<Armor> YOLO11::detect(const cv::Mat & raw_img, int frame_count)
     if (roi_.height == -1) {  // -1 表示该维度不裁切
       roi_.height = raw_img.rows;
     }
-    bgr_img = raw_img(roi_);
+    bgr_img = raw_img(roi_);  // ROI是浅拷贝，共享数据
   } else {
-    bgr_img = raw_img;
+    bgr_img = raw_img;  // 浅拷贝，共享数据
   }
 
   auto x_scale = static_cast<double>(640) / bgr_img.rows;

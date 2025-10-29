@@ -95,7 +95,18 @@ public:
     while (!queue_.empty()) {
       queue_.pop();
     }
-    not_empty_condition_.notify_all();  // 如果其他线程正在等待队列不为空，这样可以唤醒它们
+    not_empty_condition_.notify_all();  // 如果其他线程正在等待队列不为空,这样可以唤醒它们
+  }
+
+  bool try_pop(T & value)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (queue_.empty()) {
+      return false;
+    }
+    value = std::move(queue_.front());
+    queue_.pop();
+    return true;
   }
 
 private:
