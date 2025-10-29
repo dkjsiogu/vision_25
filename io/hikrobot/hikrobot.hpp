@@ -21,6 +21,9 @@ public:
   void read(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp) override;
 
 private:
+  std::mutex mutex_;
+  std::condition_variable cv_;  // 添加条件变量
+
   struct CameraData
   {
     cv::Mat img;

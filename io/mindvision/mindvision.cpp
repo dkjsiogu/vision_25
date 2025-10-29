@@ -55,7 +55,7 @@ void MindVision::read(cv::Mat & img, std::chrono::steady_clock::time_point & tim
   CameraData data;
   queue_.pop(data);
 
-  img = data.img;
+  img = std::move(data.img);  // 使用移动语义，避免拷贝
   timestamp = data.timestamp;
 }
 

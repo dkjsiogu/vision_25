@@ -32,7 +32,7 @@ tools::OrderedQueue frame_queue;
 void detect_frame(tools::Frame && frame, auto_aim::YOLO & yolo)
 {
   frame.armors = yolo.detect(frame.img);
-  frame_queue.enqueue(frame);
+  frame_queue.enqueue(std::move(frame));  // 使用移动语义
 }
 
 int main(int argc, char * argv[])
@@ -68,10 +68,9 @@ int main(int argc, char * argv[])
 
   io::Camera camera(config_path);
   int num_yolo_thread = 8;
-  auto yolos = tools::create_yolov8s(config_path, num_yolo_thread, true);
-  // auto yolos = tools::create_yolo11s(config_path, num_yolo_thread, true);
-  std::vector<bool> yolo_used(num_yolo_thread, false);
-  tools::ThreadPool thread_pool(num_yolo_thread);
+  
+  // ✅ 使用新的YOLOThreadPool（推荐）
+  tools::YOLOThreadPool yolo_pool(config_path, num_yolo_thread, true);
 
   cv::Mat img;
   Eigen::Quaterniond q;
@@ -85,33 +84,19 @@ int main(int argc, char * argv[])
     auto dt = tools::delta_time(t, last_t);
     last_t = t;
 
-    // tools::logger()->info("{:.2f} fps", 1 / dt);
-    // tools::draw_text(img, fmt::format("{:.2f} fps", 1/dt), {10, 60}, {255, 255, 255});
     nlohmann::json data;
     data["fps"] = 1 / dt;
 
     frame_id++;
 
-    // 将处理任务提交到线程池
-    std::mutex yolo_mutex;
-    thread_pool.enqueue([&, frame_id, t] {
-      auto_aim::YOLO * yolo = nullptr;
-      int yolo_id = -1;
-      for (int i = 0; i < num_yolo_thread; i++) {
-        if (!yolo_used[i]) {
-          yolo_used[i] = true;
-          yolo = &yolos[i];
-          yolo_id = i;
-          break;
-        }
-      }
-      if (yolo) {
-        tools::Frame frame{frame_id, img.clone(), t};
-        detect_frame(std::move(frame), *yolo);
-
-        yolo_used[yolo_id] = false;
-      }
+    // ✅ 使用移动语义，避免拷贝
+    tools::Frame frame{frame_id, std::move(img), t};
+    
+    // ✅ 提交检测任务，自动管理YOLO实例
+    yolo_pool.detect_async(std::move(frame), [](tools::Frame && processed_frame) {
+      frame_queue.enqueue(std::move(processed_frame));
     });
+
     plotter.plot(data);
 
     auto key = cv::waitKey(1);
