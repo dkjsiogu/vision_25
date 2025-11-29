@@ -26,7 +26,7 @@ public:
   Target() = default;
   Target(
     const Armor & armor, std::chrono::steady_clock::time_point t, double radius, int armor_num,
-    Eigen::VectorXd P0_dig);
+    Eigen::VectorXd P0_dig, std::vector<double> height_offsets = {});
   Target(double x, double vyaw, double radius, double h);
 
   void predict(std::chrono::steady_clock::time_point t);
@@ -51,6 +51,8 @@ private:
   int update_count_;
 
   bool is_switch_, is_converged_;
+
+  std::vector<double> height_offsets_;  // 前哨站各层高度偏移
 
   tools::ExtendedKalmanFilter ekf_;
   std::chrono::steady_clock::time_point t_;

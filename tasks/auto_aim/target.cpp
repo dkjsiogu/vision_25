@@ -9,7 +9,7 @@ namespace auto_aim
 {
 Target::Target(
   const Armor & armor, std::chrono::steady_clock::time_point t, double radius, int armor_num,
-  Eigen::VectorXd P0_dig)
+  Eigen::VectorXd P0_dig, std::vector<double> height_offsets)
 : name(armor.name),
   armor_type(armor.type),
   jumped(false),
@@ -19,7 +19,8 @@ Target::Target(
   t_(t),
   is_switch_(false),
   is_converged_(false),
-  switch_count_(0)
+  switch_count_(0),
+  height_offsets_(height_offsets)
 {
   auto r = radius;
   priority = armor.priority;
@@ -272,7 +273,16 @@ Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
   auto r = (use_l_h) ? x[8] + x[9] : x[8];
   auto armor_x = x[0] - r * std::cos(angle);
   auto armor_y = x[2] - r * std::sin(angle);
-  auto armor_z = (use_l_h) ? x[4] + x[10] : x[4];
+
+  // 前哨站特殊处理：3块装甲板在不同高度（从配置读取）
+  double armor_z;
+  if (name == ArmorName::outpost && !height_offsets_.empty()) {
+    // 使用配置的高度偏移
+    int height_idx = std::min(id, static_cast<int>(height_offsets_.size()) - 1);
+    armor_z = x[4] + height_offsets_[height_idx];
+  } else {
+    armor_z = (use_l_h) ? x[4] + x[10] : x[4];
+  }
 
   return {armor_x, armor_y, armor_z};
 }

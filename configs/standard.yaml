@@ -36,6 +36,12 @@ min_detect_count: 5
 max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
 
+# 前哨站三层装甲板高度偏移（相对于中层，单位：m）
+# 下层：center + outpost_height_offsets[0]
+# 中层：center + outpost_height_offsets[1]（基准层，应为0）
+# 上层：center + outpost_height_offsets[2]
+outpost_height_offsets: [-0.1, 0.0, 0.1]
+
 #####-----aimer参数-----#####
 yaw_offset: 2 # degree -2.5
 pitch_offset: 6.5 # degree 2
