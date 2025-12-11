@@ -37,6 +37,10 @@ private:
   Eigen::Vector3d t_camera2gimbal_;
   Eigen::Matrix3d R_gimbal2world_;
 
+  // 优化：预计算组合矩阵，减少重复计算
+  mutable Eigen::Matrix3d R_world2camera_;  // R_camera2gimbal^T * R_gimbal2world^T
+  mutable bool matrices_cache_valid_;
+
   void optimize_yaw(Armor & armor) const;
 
   double armor_reprojection_error(const Armor & armor, double yaw, const double & inclined) const;

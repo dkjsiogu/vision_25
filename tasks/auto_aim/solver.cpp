@@ -24,7 +24,8 @@ const std::vector<cv::Point3f> SMALL_ARMOR_POINTS{
   {0, -SMALL_ARMOR_WIDTH / 2, -LIGHTBAR_LENGTH / 2},
   {0, SMALL_ARMOR_WIDTH / 2, -LIGHTBAR_LENGTH / 2}};
 
-Solver::Solver(const std::string & config_path) : R_gimbal2world_(Eigen::Matrix3d::Identity())
+Solver::Solver(const std::string & config_path)
+: R_gimbal2world_(Eigen::Matrix3d::Identity()), matrices_cache_valid_(false)
 {
   auto yaml = YAML::LoadFile(config_path);
 
@@ -49,6 +50,10 @@ void Solver::set_R_gimbal2world(const Eigen::Quaterniond & q)
 {
   Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
   R_gimbal2world_ = R_gimbal2imubody_.transpose() * R_imubody2imuabs * R_gimbal2imubody_;
+
+  // 优化：预计算组合矩阵
+  R_world2camera_ = R_camera2gimbal_.transpose() * R_gimbal2world_.transpose();
+  matrices_cache_valid_ = true;
 }
 
 //solvePnP（获得姿态）
@@ -107,8 +112,8 @@ std::vector<cv::Point2f> Solver::reproject_armor(
 
   // get R_armor2camera t_armor2camera
   const Eigen::Vector3d & t_armor2world = xyz_in_world;
-  Eigen::Matrix3d R_armor2camera =
-    R_camera2gimbal_.transpose() * R_gimbal2world_.transpose() * R_armor2world;
+  // 优化：使用预计算的组合矩阵
+  Eigen::Matrix3d R_armor2camera = R_world2camera_ * R_armor2world;
   Eigen::Vector3d t_armor2camera =
     R_camera2gimbal_.transpose() * (R_gimbal2world_.transpose() * t_armor2world - t_camera2gimbal_);
 
@@ -172,8 +177,8 @@ double Solver::oupost_reprojection_error(Armor armor, const double & pitch)
 
   // get R_armor2camera t_armor2camera
   const Eigen::Vector3d & t_armor2world = xyz_in_world;
-  Eigen::Matrix3d _R_armor2camera =
-    R_camera2gimbal_.transpose() * R_gimbal2world_.transpose() * _R_armor2world;
+  // 优化：使用预计算的组合矩阵
+  Eigen::Matrix3d _R_armor2camera = R_world2camera_ * _R_armor2world;
   Eigen::Vector3d t_armor2camera =
     R_camera2gimbal_.transpose() * (R_gimbal2world_.transpose() * t_armor2world - t_camera2gimbal_);
 
@@ -197,7 +202,8 @@ void Solver::optimize_yaw(Armor & armor) const
 {
   Eigen::Vector3d gimbal_ypr = tools::eulers(R_gimbal2world_, 2, 1, 0);
 
-  constexpr double SEARCH_RANGE = 140;  // degree
+  // 优化：减少搜索范围从140度到70度，大部分目标在此范围内
+  constexpr double SEARCH_RANGE = 70;  // degree
   auto yaw0 = tools::limit_rad(gimbal_ypr[0] - SEARCH_RANGE / 2 * CV_PI / 180.0);
 
   auto min_error = 1e10;

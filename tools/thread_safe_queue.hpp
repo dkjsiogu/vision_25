@@ -33,7 +33,7 @@ public:
     }
 
     queue_.push(value);
-    not_empty_condition_.notify_all();
+    not_empty_condition_.notify_one();  // 优化：单消费者场景避免惊群效应
   }
 
   void pop(T & value)
