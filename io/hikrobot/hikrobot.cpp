@@ -20,18 +20,13 @@ HikRobot::HikRobot(double exposure_ms, double gain, const std::string & vid_pid)
     capture_start();
 
     while (!daemon_quit_) {
-      std::unique_lock<std::mutex> lock(mutex_);
-      // 使用条件变量等待，只在capturing_变为false或超时时唤醒
-      cv_.wait_for(lock, 100ms, [this] { return !capturing_ || daemon_quit_; });
+      std::this_thread::sleep_for(100ms);
 
-      if (daemon_quit_) break;
+      if (capturing_) continue;
 
-      if (!capturing_) {
-        lock.unlock();  // 释放锁再执行耗时操作
-        capture_stop();
-        reset_usb();
-        capture_start();
-      }
+      capture_stop();
+      reset_usb();
+      capture_start();
     }
 
     capture_stop();
@@ -43,7 +38,6 @@ HikRobot::HikRobot(double exposure_ms, double gain, const std::string & vid_pid)
 HikRobot::~HikRobot()
 {
   daemon_quit_ = true;
-  cv_.notify_all();  // 通知条件变量立即唤醒
   if (daemon_thread_.joinable()) daemon_thread_.join();
   tools::logger()->info("HikRobot destructed.");
 }
@@ -53,7 +47,7 @@ void HikRobot::read(cv::Mat & img, std::chrono::steady_clock::time_point & times
   CameraData data;
   queue_.pop(data);
 
-  img = std::move(data.img);  // 使用移动语义，避免拷贝
+  img = data.img;
   timestamp = data.timestamp;
 }
 
@@ -110,7 +104,8 @@ void HikRobot::capture_start()
     MV_CC_PIXEL_CONVERT_PARAM cvt_param;
 
     while (!capture_quit_) {
-      // 去掉sleep，MV_CC_GetImageBuffer本身就是阻塞调用
+      std::this_thread::sleep_for(1ms);
+
       unsigned int ret;
       unsigned int nMsec = 100;
 
@@ -156,7 +151,6 @@ void HikRobot::capture_start()
     }
 
     capturing_ = false;
-    cv_.notify_all();  // 通知daemon线程相机已断线
     tools::logger()->info("HikRobot's capture thread stopped.");
   }};
 }

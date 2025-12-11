@@ -66,6 +66,35 @@ Target::Target(double x, double vyaw, double radius, double h) : armor_num_(4)
   ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);  //初始化滤波器（预测量、预测量协方差）
 }
 
+// 从外部数据构造 (用于OutpostTarget适配)
+Target::Target(
+  ArmorName name_, ArmorType type, ArmorPriority priority_, bool jumped_, int last_id_,
+  const Eigen::VectorXd & ekf_x, const std::vector<Eigen::Vector4d> & armor_list, int armor_num)
+: name(name_),
+  armor_type(type),
+  priority(priority_),
+  jumped(jumped_),
+  last_id(last_id_),
+  armor_num_(armor_num),
+  switch_count_(0),
+  update_count_(10),  // 标记为已收敛
+  is_switch_(false),
+  is_converged_(true),
+  external_armor_list_(armor_list),
+  use_external_armor_list_(true)
+{
+  Eigen::VectorXd P0_dig{{0.1, 1, 0.1, 1, 0.1, 1, 0.1, 0.1, 1e-4, 0, 0}};
+  Eigen::MatrixXd P0 = P0_dig.asDiagonal();
+
+  auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
+    Eigen::VectorXd c = a + b;
+    c[6] = tools::limit_rad(c[6]);
+    return c;
+  };
+
+  ekf_ = tools::ExtendedKalmanFilter(ekf_x, P0, x_add);
+}
+
 void Target::predict(std::chrono::steady_clock::time_point t)
 {
   auto dt = tools::delta_time(t, t_);
@@ -229,6 +258,11 @@ const tools::ExtendedKalmanFilter & Target::ekf() const { return ekf_; }
 
 std::vector<Eigen::Vector4d> Target::armor_xyza_list() const
 {
+  // 如果使用外部提供的装甲板列表 (OutpostTarget适配)
+  if (use_external_armor_list_) {
+    return external_armor_list_;
+  }
+
   std::vector<Eigen::Vector4d> _armor_xyza_list;
 
   for (int i = 0; i < armor_num_; i++) {

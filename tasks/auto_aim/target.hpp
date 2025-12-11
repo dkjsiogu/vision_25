@@ -29,6 +29,11 @@ public:
     Eigen::VectorXd P0_dig, std::vector<double> height_offsets = {});
   Target(double x, double vyaw, double radius, double h);
 
+  // 从外部数据构造 (用于OutpostTarget适配)
+  Target(
+    ArmorName name, ArmorType type, ArmorPriority priority, bool jumped, int last_id,
+    const Eigen::VectorXd & ekf_x, const std::vector<Eigen::Vector4d> & armor_list, int armor_num);
+
   void predict(std::chrono::steady_clock::time_point t);
   void predict(double dt);
   void update(const Armor & armor);
@@ -53,6 +58,8 @@ private:
   bool is_switch_, is_converged_;
 
   std::vector<double> height_offsets_;  // 前哨站各层高度偏移
+  std::vector<Eigen::Vector4d> external_armor_list_;  // 外部提供的装甲板列表
+  bool use_external_armor_list_ = false;
 
   tools::ExtendedKalmanFilter ekf_;
   std::chrono::steady_clock::time_point t_;

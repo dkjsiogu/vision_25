@@ -16,7 +16,10 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   state_{"lost"},
   pre_state_{"lost"},
   last_timestamp_(std::chrono::steady_clock::now()),
-  omni_target_priority_{ArmorPriority::fifth}
+  omni_target_priority_{ArmorPriority::fifth},
+  outpost_target_(config_path),
+  is_tracking_outpost_(false),
+  config_path_(config_path)
 {
   auto yaml = YAML::LoadFile(config_path);
   enemy_color_ = (yaml["enemy_color"].as<std::string>() == "red") ? Color::red : Color::blue;
@@ -24,13 +27,6 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   max_temp_lost_count_ = yaml["max_temp_lost_count"].as<int>();
   outpost_max_temp_lost_count_ = yaml["outpost_max_temp_lost_count"].as<int>();
   normal_temp_lost_count_ = max_temp_lost_count_;
-
-  // 读取前哨站高度偏移配置
-  if (yaml["outpost_height_offsets"]) {
-    outpost_height_offsets_ = yaml["outpost_height_offsets"].as<std::vector<double>>();
-  } else {
-    outpost_height_offsets_ = {-0.1, 0.0, 0.1};  // 默认值
-  }
 }
 
 std::string Tracker::state() const { return state_; }
@@ -45,16 +41,23 @@ std::list<Target> Tracker::track(
   if (state_ != "lost" && dt > 0.1) {
     tools::logger()->warn("[Tracker] Large dt: {:.3f}s", dt);
     state_ = "lost";
+    is_tracking_outpost_ = false;
+    outpost_target_.reset();
   }
+
   // 过滤掉非我方装甲板
   armors.remove_if([&](const auto_aim::Armor & a) { return a.color != enemy_color_; });
 
-  // 过滤前哨站顶部装甲板
-  // armors.remove_if([this](const auto_aim::Armor & a) {
-  //   return a.name == ArmorName::outpost &&
-  //          solver_.oupost_reprojection_error(a, 27.5 * CV_PI / 180.0) <
-  //            solver_.oupost_reprojection_error(a, -15 * CV_PI / 180.0);
-  // });
+  // 检查是否有前哨站装甲板
+  bool has_outpost = std::any_of(
+    armors.begin(), armors.end(), [](const Armor & a) { return a.name == ArmorName::outpost; });
+
+  // 如果正在追踪前哨站，或者检测到前哨站装甲板，使用前哨站专用追踪
+  if (is_tracking_outpost_ || has_outpost) {
+    return handle_outpost(armors, t) ? std::list<Target>{outpost_to_target()} : std::list<Target>{};
+  }
+
+  // 非前哨站目标的正常追踪逻辑
 
   // 优先选择靠近图像中心的装甲板
   armors.sort([](const Armor & a, const Armor & b) {
@@ -252,10 +255,8 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
     target_ = Target(armor, t, 0.2, 2, P0_dig);
   }
 
-  else if (armor.name == ArmorName::outpost) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
-    target_ = Target(armor, t, 0.2765, 3, P0_dig, outpost_height_offsets_);
-  }
+  // 前哨站使用专用追踪器，不走这里
+  // else if (armor.name == ArmorName::outpost) { ... }
 
   else if (armor.name == ArmorName::base) {
     Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0}};
@@ -297,6 +298,92 @@ bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock
   }
 
   return true;
+}
+
+bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_clock::time_point t)
+{
+  // 提取前哨站装甲板
+  std::list<Armor> outpost_armors;
+  for (auto & armor : armors) {
+    if (armor.name == ArmorName::outpost) {
+      solver_.solve(armor);
+      outpost_armors.push_back(armor);
+    }
+  }
+
+  // 如果没有前哨站装甲板
+  if (outpost_armors.empty()) {
+    // 如果正在追踪前哨站，进行预测
+    if (is_tracking_outpost_ && outpost_target_.state() == OutpostState::TRACKING) {
+      outpost_target_.predict(t);
+      // 检查丢失计数 (这里简化处理，依赖OutpostTarget内部状态)
+      // 如果OutpostTarget状态变为非TRACKING，则重置
+      if (outpost_target_.state() != OutpostState::TRACKING) {
+        tools::logger()->info("[Tracker] Outpost target lost");
+        is_tracking_outpost_ = false;
+        state_ = "lost";
+        return false;
+      }
+      state_ = "temp_lost";
+      return true;  // 仍然返回target用于预测瞄准
+    }
+
+    // 否则退出前哨站追踪模式
+    if (is_tracking_outpost_) {
+      tools::logger()->info("[Tracker] Exit outpost tracking mode");
+      is_tracking_outpost_ = false;
+      outpost_target_.reset();
+    }
+    state_ = "lost";
+    return false;
+  }
+
+  // 有前哨站装甲板，更新追踪
+  is_tracking_outpost_ = true;
+
+  // 选择最靠近图像中心的装甲板
+  outpost_armors.sort([](const Armor & a, const Armor & b) {
+    cv::Point2f img_center(1440 / 2, 1080 / 2);
+    return cv::norm(a.center - img_center) < cv::norm(b.center - img_center);
+  });
+
+  auto & best_armor = outpost_armors.front();
+
+  // 更新前哨站追踪器
+  bool tracking = outpost_target_.update(best_armor, t);
+
+  // 更新Tracker状态以匹配OutpostTarget状态
+  switch (outpost_target_.state()) {
+    case OutpostState::LOST:
+      state_ = "lost";
+      break;
+    case OutpostState::SCANNING:
+      state_ = "detecting";  // 扫描阶段不开火
+      break;
+    case OutpostState::VALIDATING:
+      state_ = "detecting";  // 验证阶段不开火
+      break;
+    case OutpostState::TRACKING:
+      state_ = "tracking";  // 追踪阶段可以开火
+      break;
+  }
+
+  return tracking;
+}
+
+Target Tracker::outpost_to_target() const
+{
+  // 将OutpostTarget转换为Target以兼容现有Aimer接口
+  return Target(
+    ArmorName::outpost,
+    ArmorType::small,
+    outpost_target_.priority,
+    outpost_target_.jumped,
+    outpost_target_.last_id,
+    outpost_target_.ekf_x(),
+    outpost_target_.armor_xyza_list(),
+    3  // 前哨站3个装甲板
+  );
 }
 
 }  // namespace auto_aim

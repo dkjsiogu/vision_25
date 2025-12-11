@@ -36,11 +36,13 @@ min_detect_count: 5
 max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
 
-# 前哨站三层装甲板高度偏移（相对于中层，单位：m）
-# 下层：center + outpost_height_offsets[0]
-# 中层：center + outpost_height_offsets[1]（基准层，应为0）
-# 上层：center + outpost_height_offsets[2]
-outpost_height_offsets: [-0.1, 0.0, 0.1]
+# 前哨站扫描建模参数
+outpost_scan_timeout: 3.0          # 扫描超时时间 (s)
+outpost_layer_gap_min: 0.05        # 层间最小高度差 (m)
+outpost_layer_gap_max: 0.20        # 层间最大高度差 (m)
+outpost_cluster_threshold: 0.03    # 高度聚类阈值 (m)
+outpost_validation_threshold: 0.15 # 验证误差阈值 (m)
+outpost_min_observations: 5        # 最少观测数
 
 #####-----aimer参数-----#####
 yaw_offset: 2 # degree -2.5
