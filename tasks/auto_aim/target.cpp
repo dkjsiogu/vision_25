@@ -173,8 +173,8 @@ void Target::update(const Armor & armor)
   const std::vector<Eigen::Vector4d> & xyza_list = armor_xyza_list();
 
   std::vector<std::pair<Eigen::Vector4d, int>> xyza_i_list;
-  for (int i = 0; i < armor_num_; i++) {
-    xyza_i_list.push_back({xyza_list[i], i});
+  for (size_t i = 0; i < xyza_list.size(); i++) {
+    xyza_i_list.push_back({xyza_list[i], static_cast<int>(i)});
   }
 
   std::sort(
@@ -185,8 +185,8 @@ void Target::update(const Armor & armor)
       return ypd1[2] < ypd2[2];
     });
 
-  // 取前3个distance最小的装甲板
-  for (int i = 0; i < 3; i++) {
+  // 取前3个distance最小的装甲板 (或更少，取决于实际数量)
+  for (size_t i = 0; i < std::min(xyza_i_list.size(), size_t(3)); i++) {
     const auto & xyza = xyza_i_list[i].first;
     Eigen::Vector3d ypd = tools::xyz2ypd(xyza.head(3));
     auto angle_error = std::abs(tools::limit_rad(armor.ypr_in_world[0] - xyza[3])) +

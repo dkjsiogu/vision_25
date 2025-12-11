@@ -360,9 +360,6 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
     case OutpostState::SCANNING:
       state_ = "detecting";  // 扫描阶段不开火
       break;
-    case OutpostState::VALIDATING:
-      state_ = "detecting";  // 验证阶段不开火
-      break;
     case OutpostState::TRACKING:
       state_ = "tracking";  // 追踪阶段可以开火
       break;
@@ -373,7 +370,8 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
 
 Target Tracker::outpost_to_target() const
 {
-  // 将OutpostTarget转换为Target以兼容现有Aimer接口
+  // 将OutpostTarget转换为Target以兼容现有Aimer/Planner接口
+  // 现在返回完整的三装甲板模型
   return Target(
     ArmorName::outpost,
     ArmorType::small,
