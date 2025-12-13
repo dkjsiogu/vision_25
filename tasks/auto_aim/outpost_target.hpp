@@ -153,7 +153,8 @@ private:
   bool try_cluster_heights();
 
   // 层识别
-  int identify_layer(double z) const;
+  int identify_layer(double z) const;        // 使用聚类结果
+  int identify_layer_dynamic(double z);      // 动态分配（聚类未完成时使用）
 
   // 应用共享约束
   void apply_shared_constraints();

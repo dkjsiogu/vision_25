@@ -293,16 +293,19 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
       add_height_observation(z, t);
 
-      if (try_cluster_heights()) {
-        int layer = identify_layer(z);
+      // 尝试聚类，即使没有完成三层也可以继续
+      try_cluster_heights();
+
+      // 收集足够观测后即可进入追踪（不需要等三层都识别到）
+      if (height_observations_.size() >= static_cast<size_t>(min_observations_)) {
+        // 尝试分配层，如果聚类完成就用聚类结果，否则动态分配
+        int layer = identify_layer_dynamic(z);
         if (layer >= 0) {
-          // 初始化该层EKF
           layer_ekf_[layer].init(armor, outpost_radius_);
           current_layer_ = layer;
           state_ = OutpostState::TRACKING;
           tools::logger()->info(
-            "[OutpostTarget] Model built! layers=[{:.3f}, {:.3f}, {:.3f}], init layer {}",
-            layer_z_[0], layer_z_[1], layer_z_[2], layer);
+            "[OutpostTarget] Start tracking! layer={}, z={:.3f}, z_ref={:.3f}", layer, z, z_ref_);
           return true;
         }
       }
@@ -310,7 +313,7 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     }
 
     case OutpostState::TRACKING: {
-      int layer = identify_layer(z);
+      int layer = identify_layer_dynamic(z);
       if (layer < 0) {
         tools::logger()->warn("[OutpostTarget] Cannot identify layer, z={:.3f}", z);
         return false;
@@ -469,6 +472,60 @@ int OutpostTarget::identify_layer(double z) const
   }
 
   if (min_dist > layer_gap_max_ / 2) return -1;
+  return best_layer;
+}
+
+int OutpostTarget::identify_layer_dynamic(double z)
+{
+  double z_rel = z - z_ref_;
+
+  // 首先尝试用聚类结果
+  int clustered_layer = identify_layer(z);
+  if (clustered_layer >= 0) {
+    return clustered_layer;
+  }
+
+  // 聚类未完成，使用动态分配
+  // 检查已初始化的层，找到最接近的
+  double min_dist = 1e10;
+  int best_layer = -1;
+
+  for (int i = 0; i < 3; i++) {
+    if (layer_ekf_[i].is_initialized()) {
+      double layer_z = layer_ekf_[i].ekf().x[4] - z_ref_;  // 从EKF状态获取z
+      double dist = std::abs(z_rel - layer_z);
+      if (dist < min_dist) {
+        min_dist = dist;
+        best_layer = i;
+      }
+    }
+  }
+
+  // 如果找到接近的已初始化层（差距小于层间距的一半），使用它
+  if (best_layer >= 0 && min_dist < layer_gap_min_ / 2) {
+    return best_layer;
+  }
+
+  // 需要分配新层
+  // 找一个未初始化的层
+  int free_layer = -1;
+  for (int i = 0; i < 3; i++) {
+    if (!layer_ekf_[i].is_initialized()) {
+      free_layer = i;
+      break;
+    }
+  }
+
+  if (free_layer >= 0) {
+    // 记录这个层的相对高度
+    layer_z_[free_layer] = z_rel;
+    layer_valid_[free_layer] = true;
+    tools::logger()->debug(
+      "[OutpostTarget] Dynamic assign layer {}, z_rel={:.3f}", free_layer, z_rel);
+    return free_layer;
+  }
+
+  // 所有层都已初始化但没找到匹配的，返回最近的
   return best_layer;
 }
 
