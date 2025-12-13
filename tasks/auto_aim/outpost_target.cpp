@@ -69,8 +69,9 @@ void OutpostTarget::init_ekf(const Armor & armor)
   Eigen::VectorXd x0(8);
   x0 << cx, 0, cy, 0, armor_z, armor_yaw, 0, outpost_radius_;
 
+  // P0 参数与 sp_vision_25 保持一致
   Eigen::VectorXd P0_dig(8);
-  P0_dig << 0.5, 16, 0.5, 16, 0.5, 0.4, 1, 1e-4;
+  P0_dig << 1, 64, 1, 64, 1, 0.4, 100, 1e-4;
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
   auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
@@ -229,7 +230,6 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     return false;
   }
 
-  last_update_time_ = t;
   temp_lost_count_ = 0;
   priority = armor.priority;
 
@@ -243,8 +243,16 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     init_ekf(armor);
     current_id_ = 0;
     state_ = OutpostState::TRACKING;
+    last_update_time_ = t;
     return true;
   }
+
+  // 先 predict 到当前时刻，再 update（正确的 EKF 流程）
+  double dt = tools::delta_time(t, last_update_time_);
+  if (dt > 0 && dt < 0.1) {
+    predict(dt);
+  }
+  last_update_time_ = t;
 
   // TRACKING状态: 用角度匹配确定id
   int id = match_armor_id(armor);
