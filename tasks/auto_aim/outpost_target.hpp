@@ -86,10 +86,6 @@ private:
   bool layer_initialized_[3] = {false, false, false};
   int layer_observation_count_[3] = {0, 0, 0};
 
-  // 每层的相位偏移 (相对于phase0，从观测中学习)
-  // 三层应该接近 0°, 120°, 240° 的某种排列
-  double layer_phase_offset_[3] = {0, 0, 0};
-
   // 高度聚类参数
   double z_cluster_threshold_ = 0.05;  // 高度聚类阈值
 
@@ -103,10 +99,16 @@ private:
   double outpost_radius_ = 0.2765;
 
   // 初始化EKF
-  void init_ekf(const Armor & armor, int layer);
+  void init_ekf(const Armor & armor);
 
   // 根据z值识别层 (返回0/1/2，或-1表示需要新建层)
   int identify_layer(double z);
+
+  // 按z重排层号（确保层0是z最小的，层2是z最大的）
+  void reorder_layers_by_z();
+
+  // 获取该层按z排序后的索引（用于计算phase偏移）
+  int get_sorted_layer_index(int layer) const;
 
   // 更新指定层
   void update_layer(const Armor & armor, int layer);
