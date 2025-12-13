@@ -48,8 +48,8 @@ void OutpostTarget::reset()
   last_id = 0;
 
   for (int i = 0; i < 3; i++) {
-    armor_z_[i] = 0;
-    armor_z_initialized_[i] = false;
+    height_offset_[i] = 0;
+    height_offset_initialized_[i] = false;
   }
 }
 
@@ -58,45 +58,47 @@ void OutpostTarget::init_ekf(const Armor & armor)
   double armor_yaw = armor.ypr_in_world[0];
   double armor_x = armor.xyz_in_world[0];
   double armor_y = armor.xyz_in_world[1];
+  double armor_z = armor.xyz_in_world[2];
 
   // 从装甲板位置推算旋转中心
   double cx = armor_x + outpost_radius_ * std::cos(armor_yaw);
   double cy = armor_y + outpost_radius_ * std::sin(armor_yaw);
 
-  // 状态: [cx, vx, cy, vy, phase0, omega, radius]
+  // 状态: [cx, vx, cy, vy, z, phase0, omega, radius]
   // 初始化时，假设观测到的是id=0的装甲板，所以phase0 = armor_yaw
-  Eigen::VectorXd x0(7);
-  x0 << cx, 0, cy, 0, armor_yaw, 0, outpost_radius_;
+  Eigen::VectorXd x0(8);
+  x0 << cx, 0, cy, 0, armor_z, armor_yaw, 0, outpost_radius_;
 
-  Eigen::VectorXd P0_dig(7);
-  P0_dig << 0.5, 16, 0.5, 16, 0.4, 1, 1e-4;
+  Eigen::VectorXd P0_dig(8);
+  P0_dig << 0.5, 16, 0.5, 16, 0.5, 0.4, 1, 1e-4;
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
   auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
     Eigen::VectorXd c = a + b;
-    c[4] = tools::limit_rad(c[4]);  // phase0
+    c[5] = tools::limit_rad(c[5]);  // phase0
     return c;
   };
 
   ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);
   ekf_initialized_ = true;
 
-  // 初始化id=0的z
-  armor_z_[0] = armor.xyz_in_world[2];
-  armor_z_initialized_[0] = true;
+  // 初始化id=0的高度偏移为0（基准）
+  height_offset_[0] = 0;
+  height_offset_initialized_[0] = true;
   current_id_ = 0;
 
   tools::logger()->info(
-    "[OutpostTarget] Init EKF: cx={:.3f}, cy={:.3f}, phase0={:.3f}, z0={:.3f}", cx, cy, armor_yaw,
-    armor_z_[0]);
+    "[OutpostTarget] Init EKF: cx={:.3f}, cy={:.3f}, z={:.3f}, phase0={:.3f}", cx, cy, armor_z,
+    armor_yaw);
 }
 
 int OutpostTarget::match_armor_id(const Armor & armor) const
 {
   if (!ekf_initialized_) return 0;
 
-  double phase0 = ekf_.x[4];
-  double cx = ekf_.x[0], cy = ekf_.x[2], r = ekf_.x[6];
+  // 状态: [cx, vx, cy, vy, z, phase0, omega, radius]
+  double phase0 = ekf_.x[5];
+  double cx = ekf_.x[0], cy = ekf_.x[2], z = ekf_.x[4], r = ekf_.x[7];
 
   double min_error = 1e10;
   int best_id = 0;
@@ -108,7 +110,7 @@ int OutpostTarget::match_armor_id(const Armor & armor) const
     // 预测的装甲板位置
     double pred_x = cx - r * std::cos(predicted_phase);
     double pred_y = cy - r * std::sin(predicted_phase);
-    double pred_z = armor_z_initialized_[id] ? armor_z_[id] : armor.xyz_in_world[2];
+    double pred_z = z + (height_offset_initialized_[id] ? height_offset_[id] : 0);
 
     // 预测的观测方向
     Eigen::Vector3d pred_xyz(pred_x, pred_y, pred_z);
@@ -129,13 +131,18 @@ int OutpostTarget::match_armor_id(const Armor & armor) const
 
 void OutpostTarget::update_armor(const Armor & armor, int id)
 {
-  // 更新该id的z (滑动平均)
-  if (!armor_z_initialized_[id]) {
-    armor_z_[id] = armor.xyz_in_world[2];
-    armor_z_initialized_[id] = true;
+  // 更新该id的高度偏移 (相对于EKF中的z)
+  // height_offset = observed_z - ekf_z
+  double observed_z = armor.xyz_in_world[2];
+  double ekf_z = ekf_.x[4];
+  double new_offset = observed_z - ekf_z;
+
+  if (!height_offset_initialized_[id]) {
+    height_offset_[id] = new_offset;
+    height_offset_initialized_[id] = true;
   } else {
     double alpha = 0.1;
-    armor_z_[id] = armor_z_[id] * (1 - alpha) + armor.xyz_in_world[2] * alpha;
+    height_offset_[id] = height_offset_[id] * (1 - alpha) + new_offset * alpha;
   }
 
   // 该id的phase偏移
@@ -147,35 +154,39 @@ void OutpostTarget::update_armor(const Armor & armor, int id)
   Eigen::VectorXd z_obs(4);
   z_obs << ypd[0], ypd[1], ypd[2], ypr[0];
 
-  // 计算雅可比矩阵
-  double cx = ekf_.x[0], cy = ekf_.x[2];
-  double phase0 = ekf_.x[4], r = ekf_.x[6];
+  // 状态: [cx, vx, cy, vy, z, phase0, omega, radius]
+  double cx = ekf_.x[0], cy = ekf_.x[2], z = ekf_.x[4];
+  double phase0 = ekf_.x[5], r = ekf_.x[7];
   double phase_id = tools::limit_rad(phase0 + phase_offset);
 
   double armor_x = cx - r * std::cos(phase_id);
   double armor_y = cy - r * std::sin(phase_id);
-  Eigen::Vector3d armor_xyz(armor_x, armor_y, armor_z_[id]);
+  double armor_z = z + height_offset_[id];
+  Eigen::Vector3d armor_xyz(armor_x, armor_y, armor_z);
 
-  // H_xyz_state: 装甲板xyz对状态的雅可比
+  // H_xyz_state: 装甲板xyz对状态的雅可比 (3x8)
+  // 状态: [cx, vx, cy, vy, z, phase0, omega, radius]
   // armor_x = cx - r * cos(phase0 + offset)
   // armor_y = cy - r * sin(phase0 + offset)
+  // armor_z = z + height_offset (height_offset是常数)
   // d(armor_x)/d(cx) = 1, d(armor_x)/d(phase0) = r * sin(phase_id), d(armor_x)/d(r) = -cos(phase_id)
   // d(armor_y)/d(cy) = 1, d(armor_y)/d(phase0) = -r * cos(phase_id), d(armor_y)/d(r) = -sin(phase_id)
+  // d(armor_z)/d(z) = 1
   // clang-format off
-  Eigen::MatrixXd H_xyz_state(3, 7);
+  Eigen::MatrixXd H_xyz_state(3, 8);
   H_xyz_state <<
-    1, 0, 0, 0,  r * std::sin(phase_id), 0, -std::cos(phase_id),
-    0, 0, 1, 0, -r * std::cos(phase_id), 0, -std::sin(phase_id),
-    0, 0, 0, 0,                       0, 0,                   0;
+    1, 0, 0, 0, 0,  r * std::sin(phase_id), 0, -std::cos(phase_id),
+    0, 0, 1, 0, 0, -r * std::cos(phase_id), 0, -std::sin(phase_id),
+    0, 0, 0, 0, 1,                       0, 0,                   0;
   // clang-format on
 
   Eigen::MatrixXd H_ypd_xyz = tools::xyz2ypd_jacobian(armor_xyz);
 
-  // 完整的观测雅可比 (4x7): [yaw, pitch, distance, armor_yaw] 对 [cx, vx, cy, vy, phase0, omega, r]
-  Eigen::MatrixXd H = Eigen::MatrixXd::Zero(4, 7);
-  H.block<3, 7>(0, 0) = H_ypd_xyz * H_xyz_state;
+  // 完整的观测雅可比 (4x8): [yaw, pitch, distance, armor_yaw] 对 [cx, vx, cy, vy, z, phase0, omega, r]
+  Eigen::MatrixXd H = Eigen::MatrixXd::Zero(4, 8);
+  H.block<3, 8>(0, 0) = H_ypd_xyz * H_xyz_state;
   // d(armor_yaw)/d(phase0) = 1 (因为 armor_yaw = phase0 + offset)
-  H(3, 4) = 1;
+  H(3, 5) = 1;
 
   // 观测噪声
   auto center_yaw = std::atan2(armor.xyz_in_world[1], armor.xyz_in_world[0]);
@@ -194,14 +205,15 @@ void OutpostTarget::update_armor(const Armor & armor, int id)
   };
 
   auto h_func = [&](const Eigen::VectorXd & x) -> Eigen::Vector4d {
-    double cx_ = x[0], cy_ = x[2];
-    double phase0_ = x[4], r_ = x[6];
+    double cx_ = x[0], cy_ = x[2], z_ = x[4];
+    double phase0_ = x[5], r_ = x[7];
     double phase_id_ = tools::limit_rad(phase0_ + phase_offset);
 
     double ax = cx_ - r_ * std::cos(phase_id_);
     double ay = cy_ - r_ * std::sin(phase_id_);
+    double az = z_ + height_offset_[id];
 
-    Eigen::Vector3d xyz(ax, ay, armor_z_[id]);
+    Eigen::Vector3d xyz(ax, ay, az);
     Eigen::Vector3d ypd_pred = tools::xyz2ypd(xyz);
 
     return {ypd_pred[0], ypd_pred[1], ypd_pred[2], phase_id_};
@@ -272,16 +284,17 @@ void OutpostTarget::predict(double dt)
 {
   if (!ekf_initialized_ || dt <= 0) return;
 
-  // 状态转移矩阵: [cx, vx, cy, vy, phase0, omega, radius]
+  // 状态转移矩阵: [cx, vx, cy, vy, z, phase0, omega, radius]
   // clang-format off
   Eigen::MatrixXd F{
-    {1, dt,  0,  0,  0,  0, 0},
-    {0,  1,  0,  0,  0,  0, 0},
-    {0,  0,  1, dt,  0,  0, 0},
-    {0,  0,  0,  1,  0,  0, 0},
-    {0,  0,  0,  0,  1, dt, 0},
-    {0,  0,  0,  0,  0,  1, 0},
-    {0,  0,  0,  0,  0,  0, 1}
+    {1, dt,  0,  0,  0,  0,  0, 0},
+    {0,  1,  0,  0,  0,  0,  0, 0},
+    {0,  0,  1, dt,  0,  0,  0, 0},
+    {0,  0,  0,  1,  0,  0,  0, 0},
+    {0,  0,  0,  0,  1,  0,  0, 0},
+    {0,  0,  0,  0,  0,  1, dt, 0},
+    {0,  0,  0,  0,  0,  0,  1, 0},
+    {0,  0,  0,  0,  0,  0,  0, 1}
   };
   // clang-format on
 
@@ -293,25 +306,26 @@ void OutpostTarget::predict(double dt)
 
   // clang-format off
   Eigen::MatrixXd Q{
-    {a * v1, b * v1,      0,      0,      0,      0, 0},
-    {b * v1, c * v1,      0,      0,      0,      0, 0},
-    {     0,      0, a * v1, b * v1,      0,      0, 0},
-    {     0,      0, b * v1, c * v1,      0,      0, 0},
-    {     0,      0,      0,      0, a * v2, b * v2, 0},
-    {     0,      0,      0,      0, b * v2, c * v2, 0},
-    {     0,      0,      0,      0,      0,      0, 0}
+    {a * v1, b * v1,      0,      0,      0,      0,      0, 0},
+    {b * v1, c * v1,      0,      0,      0,      0,      0, 0},
+    {     0,      0, a * v1, b * v1,      0,      0,      0, 0},
+    {     0,      0, b * v1, c * v1,      0,      0,      0, 0},
+    {     0,      0,      0,      0,      0,      0,      0, 0},
+    {     0,      0,      0,      0,      0, a * v2, b * v2, 0},
+    {     0,      0,      0,      0,      0, b * v2, c * v2, 0},
+    {     0,      0,      0,      0,      0,      0,      0, 0}
   };
   // clang-format on
 
   auto f = [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
     Eigen::VectorXd x_prior = F * x;
-    x_prior[4] = tools::limit_rad(x_prior[4]);
+    x_prior[5] = tools::limit_rad(x_prior[5]);  // phase0
     return x_prior;
   };
 
-  // 限制角速度范围
-  if (update_count_ > 10 && std::abs(ekf_.x[5]) > 2) {
-    ekf_.x[5] = ekf_.x[5] > 0 ? 2.51 : -2.51;
+  // 限制角速度范围 (omega is at index 6)
+  if (update_count_ > 10 && std::abs(ekf_.x[6]) > 2) {
+    ekf_.x[6] = ekf_.x[6] > 0 ? 2.51 : -2.51;
   }
 
   ekf_.predict(F, Q, f);
@@ -321,36 +335,22 @@ Eigen::Vector4d OutpostTarget::armor_xyza(int id) const
 {
   if (!ekf_initialized_) return {0, 0, 0, 0};
 
-  double cx = ekf_.x[0], cy = ekf_.x[2];
-  double phase0 = ekf_.x[4], r = ekf_.x[6];
+  // 状态: [cx, vx, cy, vy, z, phase0, omega, radius]
+  double cx = ekf_.x[0], cy = ekf_.x[2], z = ekf_.x[4];
+  double phase0 = ekf_.x[5], r = ekf_.x[7];
 
   double phase_id = tools::limit_rad(phase0 + id * 2 * M_PI / 3);
 
   double armor_x = cx - r * std::cos(phase_id);
   double armor_y = cy - r * std::sin(phase_id);
 
-  // 使用该id对应的z，如果未初始化则用已初始化的z的平均值
-  double z = 0;
-  if (armor_z_initialized_[id]) {
-    z = armor_z_[id];
-  } else {
-    int count = 0;
-    for (int i = 0; i < 3; i++) {
-      if (armor_z_initialized_[i]) {
-        z += armor_z_[i];
-        count++;
-      }
-    }
-    if (count > 0) {
-      z /= count;
-    } else {
-      // 如果没有任何z被初始化，使用一个默认值（不应该发生）
-      tools::logger()->warn("[OutpostTarget] No z initialized for armor_xyza({})", id);
-      z = 0.3;  // 默认值
-    }
+  // 使用EKF中的z + 该id的高度偏移
+  double armor_z = z;
+  if (height_offset_initialized_[id]) {
+    armor_z += height_offset_[id];
   }
 
-  return {armor_x, armor_y, z, phase_id};
+  return {armor_x, armor_y, armor_z, phase_id};
 }
 
 std::vector<Eigen::Vector4d> OutpostTarget::armor_xyza_list() const
@@ -361,9 +361,9 @@ std::vector<Eigen::Vector4d> OutpostTarget::armor_xyza_list() const
     return list;
   }
 
-  // 返回所有已初始化z的装甲板
+  // 返回所有已初始化高度偏移的装甲板
   for (int i = 0; i < 3; i++) {
-    if (armor_z_initialized_[i]) {
+    if (height_offset_initialized_[i]) {
       list.push_back(armor_xyza(i));
     }
   }
@@ -392,21 +392,9 @@ Eigen::VectorXd OutpostTarget::ekf_x() const
     return x;
   }
 
-  // 选择一个z值
-  double z = 0;
-  if (current_id_ >= 0 && armor_z_initialized_[current_id_]) {
-    z = armor_z_[current_id_];
-  } else {
-    for (int i = 0; i < 3; i++) {
-      if (armor_z_initialized_[i]) {
-        z = armor_z_[i];
-        break;
-      }
-    }
-  }
-
+  // 8维状态: [cx, vx, cy, vy, z, phase0, omega, radius]
   // 转换为Target兼容的11维状态: [cx, vx, cy, vy, z, vz, phase, omega, radius, l, h]
-  x << ekf_.x[0], ekf_.x[1], ekf_.x[2], ekf_.x[3], z, 0, ekf_.x[4], ekf_.x[5], ekf_.x[6], 0, 0;
+  x << ekf_.x[0], ekf_.x[1], ekf_.x[2], ekf_.x[3], ekf_.x[4], 0, ekf_.x[5], ekf_.x[6], ekf_.x[7], 0, 0;
   return x;
 }
 
@@ -414,10 +402,11 @@ bool OutpostTarget::diverged() const
 {
   if (!ekf_initialized_) return false;
 
-  double r = ekf_.x[6];
+  // 状态: [cx, vx, cy, vy, z, phase0, omega, radius]
+  double r = ekf_.x[7];
   if (r < 0.1 || r > 0.5) return true;
 
-  double omega = std::abs(ekf_.x[5]);
+  double omega = std::abs(ekf_.x[6]);
   if (omega > 5.0) return true;
 
   return false;
