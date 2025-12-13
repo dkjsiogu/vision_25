@@ -20,8 +20,23 @@ Target::Target(
   is_switch_(false),
   is_converged_(false),
   switch_count_(0),
-  height_offsets_(height_offsets)
+  use_dynamic_height_(true)  // 所有目标都启用动态高度学习
 {
+  // 初始化动态高度偏移向量
+  height_offset_.resize(armor_num, 0.0);
+  height_offset_initialized_.resize(armor_num, false);
+
+  // 如果提供了静态高度偏移配置，作为初始值
+  if (!height_offsets.empty()) {
+    for (size_t i = 0; i < std::min(height_offsets.size(), height_offset_.size()); i++) {
+      height_offset_[i] = height_offsets[i];
+      height_offset_initialized_[i] = true;
+    }
+  }
+
+  // 第一个装甲板(id=0)作为基准，高度偏移为0
+  height_offset_[0] = 0;
+  height_offset_initialized_[0] = true;
   auto r = radius;
   priority = armor.priority;
   const Eigen::VectorXd & xyz = armor.xyz_in_world;
@@ -50,8 +65,14 @@ Target::Target(
   ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);  //初始化滤波器（预测量、预测量协方差）
 }
 
-Target::Target(double x, double vyaw, double radius, double h) : armor_num_(4)
+Target::Target(double x, double vyaw, double radius, double h)
+: armor_num_(4),
+  use_dynamic_height_(true)  // 启用动态高度学习
 {
+  // 初始化动态高度偏移向量
+  height_offset_.resize(4, 0.0);
+  height_offset_initialized_.resize(4, true);  // 测试用，全部初始化
+
   Eigen::VectorXd x0{{x, 0, 0, 0, 0, 0, 0, vyaw, radius, 0, h}};
   Eigen::VectorXd P0_dig{{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
@@ -81,8 +102,13 @@ Target::Target(
   is_switch_(false),
   is_converged_(true),
   t_(std::chrono::steady_clock::now()),  // 初始化时间戳
-  use_external_armor_list_(false)  // 不使用外部列表，让 predict 能正常工作
+  use_external_armor_list_(false),  // 不使用外部列表，让 predict 能正常工作
+  use_dynamic_height_(true)  // 启用动态高度学习
 {
+  // 初始化动态高度偏移向量
+  height_offset_.resize(armor_num, 0.0);
+  height_offset_initialized_.resize(armor_num, true);  // 从外部数据构造，假设已初始化
+
   Eigen::VectorXd P0_dig{{0.1, 1, 0.1, 1, 0.1, 1, 0.1, 0.1, 1e-4, 0, 0}};
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
@@ -211,6 +237,11 @@ void Target::update(const Armor & armor)
   last_id = id;
   update_count_++;
 
+  // 先更新高度偏移（使用当前观测数据）
+  if (use_dynamic_height_) {
+    update_height_offset(armor, id);
+  }
+
   update_ypda(armor, id);
 }
 
@@ -250,6 +281,30 @@ void Target::update_ypda(const Armor & armor, int id)
   Eigen::VectorXd z{{ypd[0], ypd[1], ypd[2], ypr[0]}};  //获得观测量
 
   ekf_.update(z, H, R, h, z_subtract);
+}
+
+void Target::update_height_offset(const Armor & armor, int id)
+{
+  // 更新该id的高度偏移 (相对于EKF中的z)
+  // height_offset = observed_z - ekf_z
+  double observed_z = armor.xyz_in_world[2];
+  double ekf_z = ekf_.x[4];
+  double new_offset = observed_z - ekf_z;
+
+  if (static_cast<size_t>(id) >= height_offset_.size()) {
+    return;  // id超出范围
+  }
+
+  if (!height_offset_initialized_[id]) {
+    height_offset_[id] = new_offset;
+    height_offset_initialized_[id] = true;
+    tools::logger()->debug(
+      "[Target] Init height_offset[{}] = {:.3f}", id, height_offset_[id]);
+  } else {
+    // 低通滤波平滑更新
+    double alpha = 0.1;
+    height_offset_[id] = height_offset_[id] * (1 - alpha) + new_offset * alpha;
+  }
 }
 
 Eigen::VectorXd Target::ekf_x() const { return ekf_.x; }
@@ -308,14 +363,17 @@ Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
   auto armor_x = x[0] - r * std::cos(angle);
   auto armor_y = x[2] - r * std::sin(angle);
 
-  // 前哨站特殊处理：3块装甲板在不同高度（从配置读取）
+  // 计算z坐标
   double armor_z;
-  if (name == ArmorName::outpost && !height_offsets_.empty()) {
-    // 使用配置的高度偏移
-    int height_idx = std::min(id, static_cast<int>(height_offsets_.size()) - 1);
-    armor_z = x[4] + height_offsets_[height_idx];
+  if (use_dynamic_height_ && static_cast<size_t>(id) < height_offset_.size() &&
+      height_offset_initialized_[id]) {
+    // 使用动态学习的高度偏移
+    armor_z = x[4] + height_offset_[id];
+  } else if (use_l_h) {
+    // 4装甲板模型，使用EKF状态中的高度差
+    armor_z = x[4] + x[10];
   } else {
-    armor_z = (use_l_h) ? x[4] + x[10] : x[4];
+    armor_z = x[4];
   }
 
   return {armor_x, armor_y, armor_z};
@@ -335,7 +393,15 @@ Eigen::MatrixXd Target::h_jacobian(const Eigen::VectorXd & x, int id) const
   auto dx_dl = (use_l_h) ? -std::cos(angle) : 0.0;
   auto dy_dl = (use_l_h) ? -std::sin(angle) : 0.0;
 
-  auto dz_dh = (use_l_h) ? 1.0 : 0.0;
+  // 当使用动态高度偏移时，armor_z = x[4] + height_offset_[id]
+  // height_offset_[id] 是常数，不依赖于 x[10]，所以 dz_dh = 0
+  double dz_dh;
+  if (use_dynamic_height_ && static_cast<size_t>(id) < height_offset_.size() &&
+      height_offset_initialized_[id]) {
+    dz_dh = 0.0;  // 动态高度偏移是常数，不依赖于EKF状态
+  } else {
+    dz_dh = (use_l_h) ? 1.0 : 0.0;
+  }
 
   // clang-format off
   Eigen::MatrixXd H_armor_xyza{

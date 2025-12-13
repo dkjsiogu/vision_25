@@ -57,7 +57,11 @@ private:
 
   bool is_switch_, is_converged_;
 
-  std::vector<double> height_offsets_;  // 前哨站各层高度偏移
+  // 动态高度偏移学习（支持不同高度的装甲板，如前哨站三层）
+  std::vector<double> height_offset_;           // 各装甲板相对于基准z的高度偏移
+  std::vector<bool> height_offset_initialized_; // 是否已初始化
+  bool use_dynamic_height_ = false;             // 是否使用动态高度学习
+
   std::vector<Eigen::Vector4d> external_armor_list_;  // 外部提供的装甲板列表
   bool use_external_armor_list_ = false;
 
@@ -65,6 +69,7 @@ private:
   std::chrono::steady_clock::time_point t_;
 
   void update_ypda(const Armor & armor, int id);  // yaw pitch distance angle
+  void update_height_offset(const Armor & armor, int id);  // 更新高度偏移
 
   Eigen::Vector3d h_armor_xyz(const Eigen::VectorXd & x, int id) const;
   Eigen::MatrixXd h_jacobian(const Eigen::VectorXd & x, int id) const;

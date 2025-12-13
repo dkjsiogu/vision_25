@@ -7,7 +7,6 @@
 #include <string>
 
 #include "armor.hpp"
-#include "outpost_target.hpp"
 #include "solver.hpp"
 #include "target.hpp"
 #include "tasks/omniperception/perceptron.hpp"
@@ -31,8 +30,7 @@ public:
     std::chrono::steady_clock::time_point t, bool use_enemy_color = true);
 
   // 获取前哨站追踪状态 (用于判断是否允许开火)
-  bool is_outpost_tracking() const { return is_tracking_outpost_ && outpost_target_.is_tracking(); }
-  const OutpostTarget & outpost_target() const { return outpost_target_; }
+  bool is_outpost_tracking() const { return target_.name == ArmorName::outpost && state_ == "tracking"; }
 
 private:
   Solver & solver_;
@@ -48,20 +46,11 @@ private:
   std::chrono::steady_clock::time_point last_timestamp_;
   ArmorPriority omni_target_priority_;
 
-  // 前哨站专用追踪器
-  OutpostTarget outpost_target_;
-  bool is_tracking_outpost_ = false;
-  std::string config_path_;
-
   void state_machine(bool found);
 
   bool set_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t);
 
   bool update_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t);
-
-  // 前哨站专用处理
-  bool handle_outpost(std::list<Armor> & armors, std::chrono::steady_clock::time_point t);
-  Target outpost_to_target() const;
 };
 
 }  // namespace auto_aim
