@@ -17,69 +17,25 @@ namespace auto_aim
 enum class OutpostState
 {
   LOST,      // 丢失
-  SCANNING,  // 扫描建模中 (识别三层高度)
-  TRACKING   // 正常追踪
-};
-
-// 高度观测记录
-struct HeightObservation
-{
-  double z;
-  std::chrono::steady_clock::time_point t;
-};
-
-/**
- * 单层前哨站EKF
- *
- * 状态向量 (9维):
- * [center_x, vx, center_y, vy, z, vz, phase, omega, radius]
- *
- * 每层独立追踪一个装甲板的圆周运动
- */
-class OutpostLayerEKF
-{
-public:
-  OutpostLayerEKF() = default;
-
-  void init(const Armor & armor, double radius);
-  void predict(double dt);
-  void update(const Armor & armor);
-
-  bool is_initialized() const { return initialized_; }
-  int update_count() const { return update_count_; }
-
-  // 获取装甲板位置 (x, y, z, phase)
-  Eigen::Vector4d armor_xyza() const;
-
-  // 获取共享参数
-  double center_x() const { return initialized_ ? ekf_.x[0] : 0; }
-  double center_y() const { return initialized_ ? ekf_.x[2] : 0; }
-  double omega() const { return initialized_ ? ekf_.x[7] : 0; }
-
-  // 软约束：将共享参数向目标值靠拢
-  void apply_shared_constraint(double target_cx, double target_cy, double target_omega, double alpha);
-
-  const tools::ExtendedKalmanFilter & ekf() const { return ekf_; }
-  bool diverged() const;
-
-private:
-  tools::ExtendedKalmanFilter ekf_;
-  bool initialized_ = false;
-  int update_count_ = 0;
-  double radius_ = 0.2765;
+  TRACKING   // 追踪中
 };
 
 /**
  * 前哨站目标追踪器
  *
- * 三层独立EKF，共享约束：
- * - 三层的旋转中心(cx, cy)应该一致
- * - 三层的角速度omega应该一致
- * - 每层独立维护自己的phase和z
+ * 核心思想：
+ * - 单一EKF维护旋转模型 [cx, vx, cy, vy, phase, omega, radius]
+ * - 三个装甲板强制120度分布
+ * - 用观测的z值来区分是哪一层
+ * - 三层各自维护高度z（相对稳定）
  *
- * 持续预测：
- * - 即使某层没有观测，也持续predict
- * - 任意时刻都能输出三个装甲板的预测位置
+ * 状态向量 (7维):
+ * [center_x, vx, center_y, vy, phase, omega, radius]
+ *
+ * 三个装甲板位置:
+ * - 层0: (cx - r*cos(phase),        cy - r*sin(phase),        z[0])
+ * - 层1: (cx - r*cos(phase + 2π/3), cy - r*sin(phase + 2π/3), z[1])
+ * - 层2: (cx - r*cos(phase + 4π/3), cy - r*sin(phase + 4π/3), z[2])
  */
 class OutpostTarget
 {
@@ -88,7 +44,7 @@ public:
   ArmorType armor_type = ArmorType::small;
   ArmorPriority priority = ArmorPriority::fifth;
   bool jumped = false;
-  int last_id = 0;  // 最近更新的层ID
+  int last_id = 0;
 
   OutpostTarget() = default;
   explicit OutpostTarget(const std::string & config_path);
@@ -104,60 +60,59 @@ public:
   void predict(std::chrono::steady_clock::time_point t);
   void predict(double dt);
 
-  // 获取三个装甲板的位置列表 (x, y, z, phase)
-  // 始终返回3个装甲板，按层0/1/2顺序
+  // 获取三个装甲板的位置列表 (x, y, z, angle)
   std::vector<Eigen::Vector4d> armor_xyza_list() const;
 
-  // EKF相关 (兼容Target接口，返回最近更新的层)
+  // EKF相关 (兼容Target接口)
   Eigen::VectorXd ekf_x() const;
-  const tools::ExtendedKalmanFilter & ekf() const;
+  const tools::ExtendedKalmanFilter & ekf() const { return ekf_; }
   bool diverged() const;
   bool convergened() const;
 
   // 调试信息
   int current_layer() const { return current_layer_; }
   double layer_z(int i) const { return (i >= 0 && i < 3) ? layer_z_[i] : 0; }
-  bool layer_valid(int i) const { return (i >= 0 && i < 3) ? layer_valid_[i] : false; }
-  const OutpostLayerEKF & layer_ekf(int i) const { return layer_ekf_[i]; }
 
 private:
   OutpostState state_ = OutpostState::LOST;
 
-  // 三层独立EKF
-  OutpostLayerEKF layer_ekf_[3];
+  // 单一EKF: [cx, vx, cy, vy, phase, omega, radius]
+  tools::ExtendedKalmanFilter ekf_;
+  bool ekf_initialized_ = false;
+  int update_count_ = 0;
 
-  // 高度层识别 (扫描阶段使用)
-  double z_ref_ = 0;
-  double layer_z_[3] = {0};  // 三层相对高度
-  bool layer_valid_[3] = {false};
-  std::deque<HeightObservation> height_observations_;
+  // 三层高度 (用PnP的z区分层，虽然不准但稳定)
+  double layer_z_[3] = {0, 0, 0};
+  bool layer_initialized_[3] = {false, false, false};
+  int layer_observation_count_[3] = {0, 0, 0};
+
+  // 每层的相位偏移 (相对于phase0，从观测中学习)
+  // 三层应该接近 0°, 120°, 240° 的某种排列
+  double layer_phase_offset_[3] = {0, 0, 0};
+
+  // 高度聚类参数
+  double z_cluster_threshold_ = 0.05;  // 高度聚类阈值
 
   // 当前状态
   int current_layer_ = -1;
   std::chrono::steady_clock::time_point last_update_time_;
-  std::chrono::steady_clock::time_point scan_start_time_;
 
   // 配置参数
-  double scan_timeout_ = 3.0;
-  double cluster_threshold_ = 0.03;
-  double layer_gap_min_ = 0.05;
-  double layer_gap_max_ = 0.20;
-  int min_observations_ = 5;
   int max_temp_lost_count_ = 75;
   int temp_lost_count_ = 0;
   double outpost_radius_ = 0.2765;
-  double constraint_alpha_ = 0.3;  // 共享约束强度
 
-  // 扫描建模
-  void add_height_observation(double z, std::chrono::steady_clock::time_point t);
-  bool try_cluster_heights();
+  // 初始化EKF
+  void init_ekf(const Armor & armor, int layer);
 
-  // 层识别
-  int identify_layer(double z) const;        // 使用聚类结果
-  int identify_layer_dynamic(double z);      // 动态分配（聚类未完成时使用）
+  // 根据z值识别层 (返回0/1/2，或-1表示需要新建层)
+  int identify_layer(double z);
 
-  // 应用共享约束
-  void apply_shared_constraints();
+  // 更新指定层
+  void update_layer(const Armor & armor, int layer);
+
+  // 计算第i层装甲板的位置
+  Eigen::Vector4d armor_xyza(int layer) const;
 };
 
 }  // namespace auto_aim

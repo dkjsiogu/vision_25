@@ -357,11 +357,8 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
     case OutpostState::LOST:
       state_ = "lost";
       break;
-    case OutpostState::SCANNING:
-      state_ = "detecting";  // 扫描阶段不开火
-      break;
     case OutpostState::TRACKING:
-      state_ = "tracking";  // 追踪阶段可以开火
+      state_ = "tracking";
       break;
   }
 
