@@ -95,18 +95,31 @@ int OutpostTarget::match_armor_id(const Armor & armor) const
 {
   if (!ekf_initialized_) return 0;
 
-  double observed_yaw = armor.ypr_in_world[0];
   double phase0 = ekf_.x[4];
+  double cx = ekf_.x[0], cy = ekf_.x[2], r = ekf_.x[6];
 
   double min_error = 1e10;
   int best_id = 0;
 
+  // 使用与sp_vision_25相同的匹配逻辑：装甲板朝向角度差 + 观测方向角度差
   for (int id = 0; id < 3; id++) {
     double predicted_phase = tools::limit_rad(phase0 + id * 2 * M_PI / 3);
-    double error = std::abs(tools::limit_rad(observed_yaw - predicted_phase));
 
-    if (error < min_error) {
-      min_error = error;
+    // 预测的装甲板位置
+    double pred_x = cx - r * std::cos(predicted_phase);
+    double pred_y = cy - r * std::sin(predicted_phase);
+    double pred_z = armor_z_initialized_[id] ? armor_z_[id] : armor.xyz_in_world[2];
+
+    // 预测的观测方向
+    Eigen::Vector3d pred_xyz(pred_x, pred_y, pred_z);
+    Eigen::Vector3d pred_ypd = tools::xyz2ypd(pred_xyz);
+
+    // 角度误差 = 装甲板朝向角度差 + 观测yaw角度差
+    double angle_error = std::abs(tools::limit_rad(armor.ypr_in_world[0] - predicted_phase)) +
+                         std::abs(tools::limit_rad(armor.ypd_in_world[0] - pred_ypd[0]));
+
+    if (angle_error < min_error) {
+      min_error = angle_error;
       best_id = id;
     }
   }
@@ -208,6 +221,11 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
   temp_lost_count_ = 0;
   priority = armor.priority;
 
+  // 调试：输出观测到的装甲板位置
+  tools::logger()->debug(
+    "[OutpostTarget] Observed armor: xyz=({:.3f}, {:.3f}, {:.3f}), yaw={:.3f}",
+    armor.xyz_in_world[0], armor.xyz_in_world[1], armor.xyz_in_world[2], armor.ypr_in_world[0]);
+
   if (state_ == OutpostState::LOST) {
     // 第一次识别
     init_ekf(armor);
@@ -221,6 +239,7 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
   if (id != current_id_) {
     jumped = true;
+    tools::logger()->debug("[OutpostTarget] Jumped from id {} to id {}", current_id_, id);
   }
   current_id_ = id;
   last_id = id;
@@ -322,7 +341,13 @@ Eigen::Vector4d OutpostTarget::armor_xyza(int id) const
         count++;
       }
     }
-    if (count > 0) z /= count;
+    if (count > 0) {
+      z /= count;
+    } else {
+      // 如果没有任何z被初始化，使用一个默认值（不应该发生）
+      tools::logger()->warn("[OutpostTarget] No z initialized for armor_xyza({})", id);
+      z = 0.3;  // 默认值
+    }
   }
 
   return {armor_x, armor_y, z, phase_id};
@@ -346,6 +371,13 @@ std::vector<Eigen::Vector4d> OutpostTarget::armor_xyza_list() const
   // 如果只有一个装甲板被初始化，也输出它（用于初期追踪）
   if (list.empty() && ekf_initialized_) {
     list.push_back(armor_xyza(0));
+  }
+
+  // 调试日志
+  if (!list.empty()) {
+    tools::logger()->debug(
+      "[OutpostTarget] armor_xyza_list: size={}, first=({:.3f}, {:.3f}, {:.3f})",
+      list.size(), list[0][0], list[0][1], list[0][2]);
   }
 
   return list;
