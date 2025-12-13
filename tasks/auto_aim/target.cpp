@@ -80,8 +80,8 @@ Target::Target(
   update_count_(10),  // 标记为已收敛
   is_switch_(false),
   is_converged_(true),
-  external_armor_list_(armor_list),
-  use_external_armor_list_(true)
+  t_(std::chrono::steady_clock::now()),  // 初始化时间戳
+  use_external_armor_list_(false)  // 不使用外部列表，让 predict 能正常工作
 {
   Eigen::VectorXd P0_dig{{0.1, 1, 0.1, 1, 0.1, 1, 0.1, 0.1, 1e-4, 0, 0}};
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
