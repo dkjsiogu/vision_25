@@ -61,7 +61,7 @@ private:
 
   // 前哨站专用处理
   bool handle_outpost(std::list<Armor> & armors, std::chrono::steady_clock::time_point t);
-  Target outpost_to_target() const;
+  Target outpost_to_target(std::chrono::steady_clock::time_point t) const;
 };
 
 }  // namespace auto_aim

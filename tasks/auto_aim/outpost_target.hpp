@@ -69,6 +69,16 @@ public:
 
   int current_id() const { return current_id_; }
 
+  // 获取高度偏移列表 (用于传递给Target)
+  std::vector<double> height_offsets() const
+  {
+    std::vector<double> offsets;
+    for (int i = 0; i < 3; i++) {
+      offsets.push_back(height_offset_initialized_[i] ? height_offset_[i] : 0.0);
+    }
+    return offsets;
+  }
+
 private:
   OutpostState state_ = OutpostState::LOST;
 

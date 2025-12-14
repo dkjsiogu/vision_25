@@ -32,7 +32,8 @@ public:
   // 从外部数据构造 (用于OutpostTarget适配)
   Target(
     ArmorName name, ArmorType type, ArmorPriority priority, bool jumped, int last_id,
-    const Eigen::VectorXd & ekf_x, const std::vector<Eigen::Vector4d> & armor_list, int armor_num);
+    const Eigen::VectorXd & ekf_x, const std::vector<Eigen::Vector4d> & armor_list, int armor_num,
+    std::chrono::steady_clock::time_point t, std::vector<double> height_offsets = {});
 
   void predict(std::chrono::steady_clock::time_point t);
   void predict(double dt);

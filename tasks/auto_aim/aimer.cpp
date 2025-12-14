@@ -119,6 +119,15 @@ io::Command Aimer::aim(
   Eigen::Vector3d final_xyz = debug_aim_point.xyza.head(3);
   double yaw = std::atan2(final_xyz.y(), final_xyz.x()) + yaw_offset_;
   double pitch = -(current_traj.pitch + pitch_offset_);  //世界坐标系下pitch向上为负
+
+  // 调试：输出关键值（特别是前哨站）
+  if (target.name == ArmorName::outpost) {
+    tools::logger()->debug(
+      "[Aimer] Outpost aim: final_xyz=({:.3f}, {:.3f}, {:.3f}), traj.pitch={:.3f}rad, final_pitch={:.3f}rad",
+      final_xyz.x(), final_xyz.y(), final_xyz.z(),
+      current_traj.pitch, pitch);
+  }
+
   return {true, false, yaw, pitch};
 }
 

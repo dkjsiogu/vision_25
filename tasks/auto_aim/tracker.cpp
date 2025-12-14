@@ -54,7 +54,7 @@ std::list<Target> Tracker::track(
 
   // 如果正在追踪前哨站，或者检测到前哨站装甲板，使用前哨站专用追踪
   if (is_tracking_outpost_ || has_outpost) {
-    return handle_outpost(armors, t) ? std::list<Target>{outpost_to_target()} : std::list<Target>{};
+    return handle_outpost(armors, t) ? std::list<Target>{outpost_to_target(t)} : std::list<Target>{};
   }
 
   // 非前哨站目标的正常追踪逻辑
@@ -365,19 +365,36 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
   return tracking;
 }
 
-Target Tracker::outpost_to_target() const
+Target Tracker::outpost_to_target(std::chrono::steady_clock::time_point t) const
 {
   // 将OutpostTarget转换为Target以兼容现有Aimer/Planner接口
-  // 现在返回完整的三装甲板模型
+  auto ekf_x = outpost_target_.ekf_x();
+  auto armor_list = outpost_target_.armor_xyza_list();
+  auto height_offsets = outpost_target_.height_offsets();  // 获取高度偏移！
+
+  // 调试：输出转换前的z坐标
+  tools::logger()->debug(
+    "[Tracker] outpost_to_target: ekf_z={:.3f}, armor_list_size={}, height_offsets=[{:.3f}, {:.3f}, {:.3f}]",
+    ekf_x[4], armor_list.size(),
+    height_offsets.size() > 0 ? height_offsets[0] : 0.0,
+    height_offsets.size() > 1 ? height_offsets[1] : 0.0,
+    height_offsets.size() > 2 ? height_offsets[2] : 0.0);
+  if (!armor_list.empty()) {
+    tools::logger()->debug(
+      "[Tracker] outpost_to_target: armor[0].z={:.3f}", armor_list[0][2]);
+  }
+
   return Target(
     ArmorName::outpost,
     ArmorType::small,
     outpost_target_.priority,
     outpost_target_.jumped,
     outpost_target_.last_id,
-    outpost_target_.ekf_x(),
-    outpost_target_.armor_xyza_list(),
-    3  // 前哨站3个装甲板
+    ekf_x,
+    armor_list,
+    3,  // 前哨站3个装甲板
+    t,  // 传递帧时间戳！
+    height_offsets  // 传递高度偏移！
   );
 }
 

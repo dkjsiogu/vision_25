@@ -69,7 +69,8 @@ Target::Target(double x, double vyaw, double radius, double h) : armor_num_(4)
 // 从外部数据构造 (用于OutpostTarget适配)
 Target::Target(
   ArmorName name_, ArmorType type, ArmorPriority priority_, bool jumped_, int last_id_,
-  const Eigen::VectorXd & ekf_x, const std::vector<Eigen::Vector4d> & armor_list, int armor_num)
+  const Eigen::VectorXd & ekf_x, const std::vector<Eigen::Vector4d> & armor_list, int armor_num,
+  std::chrono::steady_clock::time_point t, std::vector<double> height_offsets)
 : name(name_),
   armor_type(type),
   priority(priority_),
@@ -80,8 +81,10 @@ Target::Target(
   update_count_(10),  // 标记为已收敛
   is_switch_(false),
   is_converged_(true),
+  t_(t),  // 使用传入的时间戳！
   external_armor_list_(armor_list),
-  use_external_armor_list_(true)
+  use_external_armor_list_(false),  // 必须为false！否则predict后armor_xyza_list()返回旧数据
+  height_offsets_(height_offsets)  // 传递高度偏移！
 {
   Eigen::VectorXd P0_dig{{0.1, 1, 0.1, 1, 0.1, 1, 0.1, 0.1, 1e-4, 0, 0}};
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();

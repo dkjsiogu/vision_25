@@ -88,9 +88,10 @@ void OutpostTarget::init_ekf(const Armor & armor)
   height_offset_initialized_[0] = true;
   current_id_ = 0;
 
+  // 调试：输出初始化信息
   tools::logger()->info(
-    "[OutpostTarget] Init EKF: cx={:.3f}, cy={:.3f}, z={:.3f}, phase0={:.3f}", cx, cy, armor_z,
-    armor_yaw);
+    "[OutpostTarget] Init EKF: cx={:.3f}, cy={:.3f}, z={:.3f}, phase0={:.3f}, armor_xyz=({:.3f}, {:.3f}, {:.3f})",
+    cx, cy, armor_z, armor_yaw, armor_x, armor_y, armor_z);
 }
 
 int OutpostTarget::match_armor_id(const Armor & armor) const
