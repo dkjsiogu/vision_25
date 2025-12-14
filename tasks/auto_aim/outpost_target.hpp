@@ -79,6 +79,18 @@ public:
     return offsets;
   }
 
+  // 获取已初始化的装甲板ID列表
+  std::vector<int> initialized_ids() const
+  {
+    std::vector<int> ids;
+    for (int i = 0; i < 3; i++) {
+      if (height_offset_initialized_[i]) {
+        ids.push_back(i);
+      }
+    }
+    return ids;
+  }
+
 private:
   OutpostState state_ = OutpostState::LOST;
 

@@ -1,5 +1,6 @@
 #include "target.hpp"
 
+#include <algorithm>
 #include <numeric>
 
 #include "tools/logger.hpp"
@@ -70,7 +71,8 @@ Target::Target(double x, double vyaw, double radius, double h) : armor_num_(4)
 Target::Target(
   ArmorName name_, ArmorType type, ArmorPriority priority_, bool jumped_, int last_id_,
   const Eigen::VectorXd & ekf_x, const std::vector<Eigen::Vector4d> & armor_list, int armor_num,
-  std::chrono::steady_clock::time_point t, std::vector<double> height_offsets)
+  std::chrono::steady_clock::time_point t, std::vector<double> height_offsets,
+  std::vector<int> initialized_ids)
 : name(name_),
   armor_type(type),
   priority(priority_),
@@ -84,7 +86,8 @@ Target::Target(
   t_(t),  // 使用传入的时间戳！
   external_armor_list_(armor_list),
   use_external_armor_list_(false),  // 必须为false！否则predict后armor_xyza_list()返回旧数据
-  height_offsets_(height_offsets)  // 传递高度偏移！
+  height_offsets_(height_offsets),  // 传递高度偏移！
+  initialized_ids_(initialized_ids)  // 传递已初始化装甲板ID！
 {
   Eigen::VectorXd P0_dig{{0.1, 1, 0.1, 1, 0.1, 1, 0.1, 0.1, 1e-4, 0, 0}};
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
@@ -269,6 +272,14 @@ std::vector<Eigen::Vector4d> Target::armor_xyza_list() const
   std::vector<Eigen::Vector4d> _armor_xyza_list;
 
   for (int i = 0; i < armor_num_; i++) {
+    // 前哨站特殊处理：只返回已初始化的装甲板
+    if (!initialized_ids_.empty()) {
+      bool is_initialized = std::find(initialized_ids_.begin(), initialized_ids_.end(), i) != initialized_ids_.end();
+      if (!is_initialized) {
+        continue;  // 跳过未初始化的装甲板
+      }
+    }
+
     auto angle = tools::limit_rad(ekf_.x[6] + i * 2 * CV_PI / armor_num_);
     Eigen::Vector3d xyz = h_armor_xyz(ekf_.x, i);
     _armor_xyza_list.push_back({xyz[0], xyz[1], xyz[2], angle});

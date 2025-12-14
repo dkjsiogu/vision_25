@@ -33,7 +33,8 @@ public:
   Target(
     ArmorName name, ArmorType type, ArmorPriority priority, bool jumped, int last_id,
     const Eigen::VectorXd & ekf_x, const std::vector<Eigen::Vector4d> & armor_list, int armor_num,
-    std::chrono::steady_clock::time_point t, std::vector<double> height_offsets = {});
+    std::chrono::steady_clock::time_point t, std::vector<double> height_offsets = {},
+    std::vector<int> initialized_ids = {});
 
   void predict(std::chrono::steady_clock::time_point t);
   void predict(double dt);
@@ -59,6 +60,7 @@ private:
   bool is_switch_, is_converged_;
 
   std::vector<double> height_offsets_;  // 前哨站各层高度偏移
+  std::vector<int> initialized_ids_;    // 已初始化的装甲板ID列表
   std::vector<Eigen::Vector4d> external_armor_list_;  // 外部提供的装甲板列表
   bool use_external_armor_list_ = false;
 

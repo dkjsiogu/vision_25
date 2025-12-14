@@ -52,11 +52,10 @@ std::list<Target> Tracker::track(
   bool has_outpost = std::any_of(
     armors.begin(), armors.end(), [](const Armor & a) { return a.name == ArmorName::outpost; });
 
-  // 暂时禁用 OutpostTarget，使用普通 Target 处理前哨站（与 sp_vision_25 保持一致）
-  // if (is_tracking_outpost_ || has_outpost) {
-  //   return handle_outpost(armors, t) ? std::list<Target>{outpost_to_target(t)} : std::list<Target>{};
-  // }
-  (void)has_outpost;  // 避免未使用警告
+  // 如果正在追踪前哨站，或者检测到前哨站装甲板，使用前哨站专用追踪
+  if (is_tracking_outpost_ || has_outpost) {
+    return handle_outpost(armors, t) ? std::list<Target>{outpost_to_target(t)} : std::list<Target>{};
+  }
 
   // 非前哨站目标的正常追踪逻辑
 
@@ -375,17 +374,22 @@ Target Tracker::outpost_to_target(std::chrono::steady_clock::time_point t) const
   auto ekf_x = outpost_target_.ekf_x();
   auto armor_list = outpost_target_.armor_xyza_list();
   auto height_offsets = outpost_target_.height_offsets();  // 获取高度偏移！
+  auto initialized_ids = outpost_target_.initialized_ids();  // 获取已初始化装甲板ID！
 
-  // 调试：输出转换前的z坐标
+  // 调试：输出完整的状态信息
   tools::logger()->debug(
-    "[Tracker] outpost_to_target: ekf_z={:.3f}, armor_list_size={}, height_offsets=[{:.3f}, {:.3f}, {:.3f}]",
-    ekf_x[4], armor_list.size(),
+    "[Tracker] outpost_to_target: ekf_x=[cx={:.3f}, vx={:.3f}, cy={:.3f}, vy={:.3f}, z={:.3f}, vz={:.3f}, angle={:.3f}, omega={:.3f}, r={:.3f}]",
+    ekf_x[0], ekf_x[1], ekf_x[2], ekf_x[3], ekf_x[4], ekf_x[5], ekf_x[6], ekf_x[7], ekf_x[8]);
+  tools::logger()->debug(
+    "[Tracker] outpost_to_target: armor_list_size={}, initialized_ids_size={}, height_offsets=[{:.3f}, {:.3f}, {:.3f}]",
+    armor_list.size(), initialized_ids.size(),
     height_offsets.size() > 0 ? height_offsets[0] : 0.0,
     height_offsets.size() > 1 ? height_offsets[1] : 0.0,
     height_offsets.size() > 2 ? height_offsets[2] : 0.0);
-  if (!armor_list.empty()) {
+  for (size_t i = 0; i < armor_list.size(); i++) {
     tools::logger()->debug(
-      "[Tracker] outpost_to_target: armor[0].z={:.3f}", armor_list[0][2]);
+      "[Tracker] outpost_to_target: armor[{}]=({:.3f}, {:.3f}, {:.3f}, {:.3f})",
+      i, armor_list[i][0], armor_list[i][1], armor_list[i][2], armor_list[i][3]);
   }
 
   return Target(
@@ -398,7 +402,8 @@ Target Tracker::outpost_to_target(std::chrono::steady_clock::time_point t) const
     armor_list,
     3,  // 前哨站3个装甲板
     t,  // 传递帧时间戳！
-    height_offsets  // 传递高度偏移！
+    height_offsets,  // 传递高度偏移！
+    initialized_ids  // 传递已初始化装甲板ID！
   );
 }
 
