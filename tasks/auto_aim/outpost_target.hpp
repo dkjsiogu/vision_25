@@ -22,22 +22,17 @@ enum class OutpostState
  * 前哨站目标追踪器
  *
  * 前哨站模型：
- * - 上中下三层，各层高度差0.1m
- * - 俯视图120度分布
+ * - 三个装甲板，俯视图120度分布
+ * - 各层高度不同，但相位和高度的对应关系未知
  * - 同一个旋转中心、角速度、半径
  *
- * 状态向量 (8维):
- * [center_x, vx, center_y, vy, z, phase0, omega, radius]
- *
- * 三个装甲板位置 (角度匹配确定id):
- * - id=0: phase = phase0, z = z + height_offset[0]
- * - id=1: phase = phase0 + 120°, z = z + height_offset[1]
- * - id=2: phase = phase0 + 240°, z = z + height_offset[2]
+ * 状态向量 (7维):
+ * [center_x, vx, center_y, vy, phase0, omega, radius]
  *
  * 关键设计：
- * 1. 用角度匹配确定观测到的是哪个装甲板(id)
- * 2. z在EKF状态中，pitch观测可以修正z
- * 3. 不同装甲板的高度差通过height_offset记录
+ * 1. 用 phase zone 划分装甲板（不匹配，直接按相位区间）
+ * 2. z 不放入 EKF，每个 zone 独立记录 z
+ * 3. 简单可靠，避免匹配错误
  */
 class OutpostTarget
 {
@@ -67,43 +62,39 @@ public:
   bool diverged() const;
   bool convergened() const;
 
-  int current_id() const { return current_id_; }
+  int current_zone() const { return current_zone_; }
 
-  // 获取高度偏移列表 (用于传递给Target)
-  std::vector<double> height_offsets() const
+  // 获取各 zone 的 z 值列表 (用于传递给Target)
+  std::vector<double> zone_z_list() const
   {
-    std::vector<double> offsets;
-    for (int i = 0; i < 3; i++) {
-      offsets.push_back(height_offset_initialized_[i] ? height_offset_[i] : 0.0);
-    }
-    return offsets;
+    return std::vector<double>(zone_z_, zone_z_ + 3);
   }
 
-  // 获取已初始化的装甲板ID列表
-  std::vector<int> initialized_ids() const
+  // 获取已初始化的 zone 列表
+  std::vector<int> initialized_zones() const
   {
-    std::vector<int> ids;
+    std::vector<int> zones;
     for (int i = 0; i < 3; i++) {
-      if (height_offset_initialized_[i]) {
-        ids.push_back(i);
+      if (zone_z_initialized_[i]) {
+        zones.push_back(i);
       }
     }
-    return ids;
+    return zones;
   }
 
 private:
   OutpostState state_ = OutpostState::LOST;
 
-  // EKF: [cx, vx, cy, vy, z, phase0, omega, radius]
+  // EKF: [cx, vx, cy, vy, phase0, omega, radius] (7维，去掉z)
   tools::ExtendedKalmanFilter ekf_;
   bool ekf_initialized_ = false;
   int update_count_ = 0;
 
-  // 三个装甲板相对于基准z的高度偏移 (id=0,1,2)
-  double height_offset_[3] = {0, 0, 0};
-  bool height_offset_initialized_[3] = {false, false, false};
+  // 三个 zone 的 z 值（直接记录，不是偏移量）
+  double zone_z_[3] = {0, 0, 0};
+  bool zone_z_initialized_[3] = {false, false, false};
 
-  int current_id_ = -1;
+  int current_zone_ = -1;
   std::chrono::steady_clock::time_point last_update_time_;
 
   int max_temp_lost_count_ = 75;
@@ -112,14 +103,14 @@ private:
 
   void init_ekf(const Armor & armor);
 
-  // 通过角度匹配确定观测到的是哪个装甲板 (返回0/1/2)
-  int match_armor_id(const Armor & armor) const;
+  // 根据装甲板朝向确定 zone (0/1/2)
+  int get_zone(double armor_yaw) const;
 
-  // 更新指定id的装甲板
-  void update_armor(const Armor & armor, int id);
+  // 更新指定 zone 的数据
+  void update_zone(const Armor & armor, int zone);
 
-  // 计算第id个装甲板的位置
-  Eigen::Vector4d armor_xyza(int id) const;
+  // 计算第 zone 个装甲板的位置
+  Eigen::Vector4d armor_xyza(int zone) const;
 };
 
 }  // namespace auto_aim

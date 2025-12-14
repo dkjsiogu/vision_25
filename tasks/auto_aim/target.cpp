@@ -322,12 +322,12 @@ Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
   auto armor_x = x[0] - r * std::cos(angle);
   auto armor_y = x[2] - r * std::sin(angle);
 
-  // 前哨站特殊处理：3块装甲板在不同高度（从配置读取）
+  // 前哨站特殊处理：3块装甲板在不同高度
   double armor_z;
   if (name == ArmorName::outpost && !height_offsets_.empty()) {
-    // 使用配置的高度偏移
+    // height_offsets_ 存储的是各 zone 的绝对 z 值（不是偏移量！）
     int height_idx = std::min(id, static_cast<int>(height_offsets_.size()) - 1);
-    armor_z = x[4] + height_offsets_[height_idx];
+    armor_z = height_offsets_[height_idx];  // 直接使用，不加 x[4]
   } else {
     armor_z = (use_l_h) ? x[4] + x[10] : x[4];
   }

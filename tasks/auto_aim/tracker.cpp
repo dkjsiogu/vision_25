@@ -255,11 +255,8 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
     target_ = Target(armor, t, 0.2, 2, P0_dig);
   }
 
-  // 前哨站：与 sp_vision_25 保持一致
-  else if (armor.name == ArmorName::outpost) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
-    target_ = Target(armor, t, 0.2765, 3, P0_dig);
-  }
+  // 前哨站使用专用追踪器，不走这里
+  // else if (armor.name == ArmorName::outpost) { ... }
 
   else if (armor.name == ArmorName::base) {
     Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0}};
@@ -373,24 +370,16 @@ Target Tracker::outpost_to_target(std::chrono::steady_clock::time_point t) const
   // 将OutpostTarget转换为Target以兼容现有Aimer/Planner接口
   auto ekf_x = outpost_target_.ekf_x();
   auto armor_list = outpost_target_.armor_xyza_list();
-  auto height_offsets = outpost_target_.height_offsets();  // 获取高度偏移！
-  auto initialized_ids = outpost_target_.initialized_ids();  // 获取已初始化装甲板ID！
+  auto zone_z = outpost_target_.zone_z_list();  // 各 zone 的 z 值
+  auto initialized_zones = outpost_target_.initialized_zones();  // 已初始化的 zone
 
-  // 调试：输出完整的状态信息
+  // 调试：输出转换前的信息
   tools::logger()->debug(
-    "[Tracker] outpost_to_target: ekf_x=[cx={:.3f}, vx={:.3f}, cy={:.3f}, vy={:.3f}, z={:.3f}, vz={:.3f}, angle={:.3f}, omega={:.3f}, r={:.3f}]",
-    ekf_x[0], ekf_x[1], ekf_x[2], ekf_x[3], ekf_x[4], ekf_x[5], ekf_x[6], ekf_x[7], ekf_x[8]);
-  tools::logger()->debug(
-    "[Tracker] outpost_to_target: armor_list_size={}, initialized_ids_size={}, height_offsets=[{:.3f}, {:.3f}, {:.3f}]",
-    armor_list.size(), initialized_ids.size(),
-    height_offsets.size() > 0 ? height_offsets[0] : 0.0,
-    height_offsets.size() > 1 ? height_offsets[1] : 0.0,
-    height_offsets.size() > 2 ? height_offsets[2] : 0.0);
-  for (size_t i = 0; i < armor_list.size(); i++) {
-    tools::logger()->debug(
-      "[Tracker] outpost_to_target: armor[{}]=({:.3f}, {:.3f}, {:.3f}, {:.3f})",
-      i, armor_list[i][0], armor_list[i][1], armor_list[i][2], armor_list[i][3]);
-  }
+    "[Tracker] outpost_to_target: ekf_z={:.3f}, armor_list_size={}, initialized_zones_size={}, zone_z=[{:.3f}, {:.3f}, {:.3f}]",
+    ekf_x[4], armor_list.size(), initialized_zones.size(),
+    zone_z.size() > 0 ? zone_z[0] : 0.0,
+    zone_z.size() > 1 ? zone_z[1] : 0.0,
+    zone_z.size() > 2 ? zone_z[2] : 0.0);
 
   return Target(
     ArmorName::outpost,
@@ -402,8 +391,8 @@ Target Tracker::outpost_to_target(std::chrono::steady_clock::time_point t) const
     armor_list,
     3,  // 前哨站3个装甲板
     t,  // 传递帧时间戳！
-    height_offsets,  // 传递高度偏移！
-    initialized_ids  // 传递已初始化装甲板ID！
+    zone_z,  // 传递各 zone 的 z 值
+    initialized_zones  // 传递已初始化的 zone
   );
 }
 
