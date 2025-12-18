@@ -21,6 +21,9 @@ OutpostTarget::OutpostTarget(const std::string & config_path)
   if (yaml["outpost_radius"]) {
     outpost_radius_ = yaml["outpost_radius"].as<double>();
   }
+  if (yaml["outpost_z_gate"]) {
+    outpost_z_gate_ = yaml["outpost_z_gate"].as<double>();
+  }
 
   reset();
 }
@@ -50,6 +53,7 @@ void OutpostTarget::reset()
   for (int i = 0; i < 3; i++) {
     zone_z_[i] = 0;
     zone_z_initialized_[i] = false;
+    last_zone_yaw_initialized_[i] = false;
   }
 }
 
@@ -93,27 +97,91 @@ void OutpostTarget::init_ekf(const Armor & armor)
     cx, cy, armor_yaw, armor_z);
 }
 
-int OutpostTarget::get_zone(double armor_yaw) const
+int OutpostTarget::match_zone(const Armor & armor) const
 {
+  // 初始化阶段：只有一个观测，直接当 zone 0
   if (!ekf_initialized_) return 0;
 
-  // 状态: [cx, vx, cy, vy, phase0, omega, radius]
-  double phase0 = ekf_.x[4];
+  // 观测量
+  const double obs_armor_yaw = armor.ypr_in_world[0];
+  const Eigen::Vector3d obs_ypd = armor.ypd_in_world;
+  const double obs_z = armor.xyz_in_world[2];
 
-  // 计算相对于 phase0 的角度差
-  double relative = tools::limit_rad(armor_yaw - phase0);
+  const double phase0 = ekf_.x[4];
+  const double cx = ekf_.x[0];
+  const double cy = ekf_.x[2];
+  const double r = ekf_.x[6];
 
-  // 根据角度差确定 zone
-  // zone 0: [-60°, 60°) 即 phase0 附近
-  // zone 1: [60°, 180°) 即 phase0 + 120° 附近
-  // zone 2: [-180°, -60°) 即 phase0 + 240° 附近
-  if (relative >= -M_PI / 3 && relative < M_PI / 3) {
-    return 0;
-  } else if (relative >= M_PI / 3 && relative < M_PI) {
-    return 1;
-  } else {
-    return 2;
+  // 权重：armor_yaw 残差是最可靠的（与高度无关），yaw/pitch/dist 用于打破边界抖动
+  constexpr double w_armor_yaw = 3.0;
+  constexpr double w_yaw = 1.0;
+  constexpr double w_pitch = 0.3;
+  constexpr double w_dist = 0.1;
+
+  int best_zone = 0;
+  double best_cost = 1e100;
+
+  for (int zone = 0; zone < 3; zone++) {
+    const double phase_zone = tools::limit_rad(phase0 + zone * 2 * M_PI / 3);
+
+    // 预测 xyz：z 若未初始化则暂用本次观测 z（否则 pitch/dist 会把 cost 弄乱）
+    const double z_use = zone_z_initialized_[zone] ? zone_z_[zone] : obs_z;
+    const double ax = cx - r * std::cos(phase_zone);
+    const double ay = cy - r * std::sin(phase_zone);
+    const Eigen::Vector3d pred_xyz(ax, ay, z_use);
+    const Eigen::Vector3d pred_ypd = tools::xyz2ypd(pred_xyz);
+
+    const double e_armor_yaw = std::abs(tools::limit_rad(obs_armor_yaw - phase_zone));
+    const double e_yaw = std::abs(tools::limit_rad(obs_ypd[0] - pred_ypd[0]));
+    const double e_pitch = std::abs(tools::limit_rad(obs_ypd[1] - pred_ypd[1]));
+    const double e_dist = std::abs(obs_ypd[2] - pred_ypd[2]) / std::max(1.0, obs_ypd[2]);
+
+    double cost = w_armor_yaw * e_armor_yaw + w_yaw * e_yaw + w_pitch * e_pitch + w_dist * e_dist;
+
+    // 滞回：偏向维持当前 zone，减少边界处抖动（尤其是低->高那类突变附近）
+    if (zone == current_zone_) cost -= 0.05;
+
+    if (cost < best_cost) {
+      best_cost = cost;
+      best_zone = zone;
+    }
   }
+
+  return best_zone;
+}
+
+void OutpostTarget::update_omega_from_observation(
+  int zone, double armor_yaw, std::chrono::steady_clock::time_point t)
+{
+  if (zone < 0 || zone >= 3 || !ekf_initialized_) return;
+
+  if (!last_zone_yaw_initialized_[zone]) {
+    last_zone_yaw_[zone] = armor_yaw;
+    last_zone_time_[zone] = t;
+    last_zone_yaw_initialized_[zone] = true;
+    return;
+  }
+
+  const double dt = tools::delta_time(t, last_zone_time_[zone]);
+  if (dt <= 0.0 || dt > 0.1) {
+    last_zone_yaw_[zone] = armor_yaw;
+    last_zone_time_[zone] = t;
+    return;
+  }
+
+  const double dyaw = tools::limit_rad(armor_yaw - last_zone_yaw_[zone]);
+  const double omega_meas = dyaw / dt;
+
+  // 只在尚未稳定前（或 omega 很离谱时）用观测来拉一把；避免稳定后被噪声扰动
+  const bool not_converged = update_count_ < 8;
+  const bool omega_bad = std::abs(ekf_.x[5]) > 6.0;
+  if (not_converged || omega_bad) {
+    const double beta = not_converged ? 0.35 : 0.15;
+    ekf_.x[5] = (1.0 - beta) * ekf_.x[5] + beta * omega_meas;
+  }
+
+  last_zone_yaw_[zone] = armor_yaw;
+  last_zone_time_[zone] = t;
 }
 
 void OutpostTarget::update_zone(const Armor & armor, int zone)
@@ -125,8 +193,16 @@ void OutpostTarget::update_zone(const Armor & armor, int zone)
     zone_z_[zone] = observed_z;
     zone_z_initialized_[zone] = true;
   } else {
+    // 高/中/低在切换时会突变，误关联一次会把该层高度污染很久。
+    // 用门限拒绝明显不合理的 z 跳变（z_gate 可在 yaml 里配置 outpost_z_gate）。
+    if (std::abs(observed_z - zone_z_[zone]) > outpost_z_gate_) {
+      tools::logger()->debug(
+        "[OutpostTarget] Reject z update: zone={}, z_obs={:.3f}, z_hist={:.3f}", zone, observed_z,
+        zone_z_[zone]);
+    } else {
     double alpha = 0.1;
     zone_z_[zone] = zone_z_[zone] * (1 - alpha) + observed_z * alpha;
+    }
   }
 
   // 该 zone 的 phase 偏移
@@ -235,8 +311,8 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
   }
   last_update_time_ = t;
 
-  // 直接根据装甲板朝向确定 zone（不匹配）
-  int zone = get_zone(armor.ypr_in_world[0]);
+  // 基于预测残差关联 zone，比固定相位区间更稳
+  int zone = match_zone(armor);
 
   if (zone != current_zone_) {
     jumped = true;
@@ -244,6 +320,9 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
   }
   current_zone_ = zone;
   last_id = zone;
+
+  // 用当前观测差分辅助 omega 初始/纠偏
+  update_omega_from_observation(zone, armor.ypr_in_world[0], t);
 
   update_zone(armor, zone);
 

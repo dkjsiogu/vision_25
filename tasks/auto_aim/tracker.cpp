@@ -325,7 +325,10 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
         return false;
       }
       state_ = "temp_lost";
-      return true;  // 仍然返回target用于预测瞄准
+      // 关键：前哨站丢失时不要继续输出预测 target。
+      // 否则 Planner 会持续给出 yaw 目标，导致云台在没有观测约束时“自转到一侧”。
+      // 这里仍保留内部 predict，便于短暂丢帧后快速重捕获。
+      return false;
     }
 
     // 否则退出前哨站追踪模式
@@ -347,10 +350,18 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
     return cv::norm(a.center - img_center) < cv::norm(b.center - img_center);
   });
 
-  auto & best_armor = outpost_armors.front();
+  // 同帧可能观测到 2~3 块装甲板：全部用于更新（更快填满 3 个高度/更稳估计 omega）。
+  // 为了让 current_zone 更稳定，最后一次更新使用最靠近图像中心的装甲板。
+  bool tracking = false;
+  if (!outpost_armors.empty()) {
+    auto best_armor = outpost_armors.front();
+    outpost_armors.pop_front();
 
-  // 更新前哨站追踪器
-  bool tracking = outpost_target_.update(best_armor, t);
+    for (auto & a : outpost_armors) {
+      tracking = outpost_target_.update(a, t) || tracking;
+    }
+    tracking = outpost_target_.update(best_armor, t) || tracking;
+  }
 
   // 更新Tracker状态以匹配OutpostTarget状态
   switch (outpost_target_.state()) {

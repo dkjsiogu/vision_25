@@ -3,6 +3,7 @@
 
 #include <Eigen/Dense>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -100,11 +101,20 @@ private:
   int max_temp_lost_count_ = 75;
   int temp_lost_count_ = 0;
   double outpost_radius_ = 0.2765;
+  double outpost_z_gate_ = 0.25;  // m, zone_z 的异常值门限
+
+  // 用于从观测差分辅助初始化/修正 omega（每个 zone 一条时间序列）
+  double last_zone_yaw_[3] = {0, 0, 0};
+  std::chrono::steady_clock::time_point last_zone_time_[3];
+  bool last_zone_yaw_initialized_[3] = {false, false, false};
 
   void init_ekf(const Armor & armor);
 
-  // 根据装甲板朝向确定 zone (0/1/2)
-  int get_zone(double armor_yaw) const;
+  // 根据预测残差关联 zone (0/1/2)，比固定相位区间更稳
+  int match_zone(const Armor & armor) const;
+
+  // 用同一 zone 的观测差分估计 omega（不会替代 EKF，只是给一个更合理的初始/纠偏）
+  void update_omega_from_observation(int zone, double armor_yaw, std::chrono::steady_clock::time_point t);
 
   // 更新指定 zone 的数据
   void update_zone(const Armor & armor, int zone);
