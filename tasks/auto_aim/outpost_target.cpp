@@ -21,8 +21,19 @@ OutpostTarget::OutpostTarget(const std::string & config_path)
   if (yaml["outpost_radius"]) {
     outpost_radius_ = yaml["outpost_radius"].as<double>();
   }
-  if (yaml["outpost_z_gate"]) {
-    outpost_z_gate_ = yaml["outpost_z_gate"].as<double>();
+  if (yaml["pitch_stable_threshold"]) {
+    pitch_stable_threshold_ = yaml["pitch_stable_threshold"].as<double>();
+  }
+
+  // 可选：pitch 不稳定时观测降权/高度滤波参数
+  if (yaml["pitch_unstable_r_scale"]) {
+    pitch_unstable_r_scale_ = yaml["pitch_unstable_r_scale"].as<double>();
+  }
+  if (yaml["observed_z_alpha_stable"]) {
+    observed_z_alpha_stable_ = yaml["observed_z_alpha_stable"].as<double>();
+  }
+  if (yaml["observed_z_alpha_unstable"]) {
+    observed_z_alpha_unstable_ = yaml["observed_z_alpha_unstable"].as<double>();
   }
 
   reset();
@@ -45,16 +56,15 @@ void OutpostTarget::reset()
   state_ = OutpostState::LOST;
   ekf_initialized_ = false;
   update_count_ = 0;
-  current_zone_ = -1;
   temp_lost_count_ = 0;
   jumped = false;
   last_id = 0;
 
-  for (int i = 0; i < 3; i++) {
-    zone_z_[i] = 0;
-    zone_z_initialized_[i] = false;
-    last_zone_yaw_initialized_[i] = false;
-  }
+  observed_z_ = 0.0;
+  observed_z_valid_ = false;
+
+  pitch_history_.clear();
+  pitch_variation_ = 1e10;
 }
 
 void OutpostTarget::init_ekf(const Armor & armor)
@@ -69,7 +79,6 @@ void OutpostTarget::init_ekf(const Armor & armor)
   double cy = armor_y + outpost_radius_ * std::sin(armor_yaw);
 
   // 状态: [cx, vx, cy, vy, phase0, omega, radius] (7维)
-  // phase0 = 第一个观测到的装甲板的朝向
   Eigen::VectorXd x0(7);
   x0 << cx, 0, cy, 0, armor_yaw, 0, outpost_radius_;
 
@@ -87,160 +96,22 @@ void OutpostTarget::init_ekf(const Armor & armor)
   ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);
   ekf_initialized_ = true;
 
-  // 初始化 zone 0 的 z 值
-  zone_z_[0] = armor_z;
-  zone_z_initialized_[0] = true;
-  current_zone_ = 0;
+  // 初始化观测 z
+  observed_z_ = armor_z;
+  observed_z_valid_ = true;
+
+  // 初始化 pitch 追踪
+  double pitch = armor.ypd_in_world[1];
+  pitch_history_.clear();
+  pitch_history_.push_back(pitch);
 
   tools::logger()->info(
-    "[OutpostTarget] Init EKF: cx={:.3f}, cy={:.3f}, phase0={:.3f}, z={:.3f}",
+    "[OutpostTarget] Init: cx={:.3f}, cy={:.3f}, phase0={:.3f}, z={:.3f}",
     cx, cy, armor_yaw, armor_z);
 }
 
-int OutpostTarget::match_zone(const Armor & armor) const
+void OutpostTarget::update_ekf(const Armor & armor)
 {
-  // 初始化阶段：只有一个观测，直接当 zone 0
-  if (!ekf_initialized_) return 0;
-
-  // 基于当前估计的角速度方向，预测“下一块”更可能出现在哪个 zone。
-  // 目的：在相位边界抖动、或高度观测偶发异常时，提供一个很轻的关联先验。
-  // 注意：只在 omega 已经相对可信时启用，避免早期误导。
-  const bool has_valid_current_zone = (current_zone_ >= 0 && current_zone_ < 3);
-  const double omega = ekf_.x[5];
-  const bool omega_reliable = (update_count_ >= 6) && (std::abs(omega) > 0.3);
-
-  int expected_next_zone = -1;
-  int expected_prev_zone = -1;
-  if (has_valid_current_zone && omega_reliable) {
-    // omega>0: 相位递增方向，下一块是 zone+1；omega<0: 相位递减方向，下一块是 zone-1
-    expected_next_zone = (omega > 0.0) ? (current_zone_ + 1) % 3 : (current_zone_ + 2) % 3;
-    expected_prev_zone = (omega > 0.0) ? (current_zone_ + 2) % 3 : (current_zone_ + 1) % 3;
-  }
-
-  // 观测量
-  const double obs_armor_yaw = armor.ypr_in_world[0];
-  const Eigen::Vector3d obs_ypd = armor.ypd_in_world;
-  const double obs_z = armor.xyz_in_world[2];
-
-  const double phase0 = ekf_.x[4];
-  const double cx = ekf_.x[0];
-  const double cy = ekf_.x[2];
-  const double r = ekf_.x[6];
-
-  // 权重：armor_yaw 残差是最可靠的（与高度无关），yaw/pitch/dist 用于打破边界抖动
-  constexpr double w_armor_yaw = 3.0;
-  constexpr double w_yaw = 1.0;
-  constexpr double w_pitch = 0.3;
-  constexpr double w_dist = 0.1;
-  constexpr double w_z = 5.0;  // z 值差异的权重，用于区分三层
-
-  // 旋转方向先验：数值要“轻”，只负责打破近似平局，不应压过真实观测残差。
-  constexpr double bonus_hold_zone = 0.06;
-  constexpr double bonus_next_zone = 0.035;
-  constexpr double penalty_prev_zone = 0.02;
-
-  int best_zone = 0;
-  double best_cost = 1e100;
-
-  for (int zone = 0; zone < 3; zone++) {
-    const double phase_zone = tools::limit_rad(phase0 + zone * 2 * M_PI / 3);
-
-    // 预测 xyz：z 若未初始化则暂用本次观测 z（否则 pitch/dist 会把 cost 弄乱）
-    const double z_use = zone_z_initialized_[zone] ? zone_z_[zone] : obs_z;
-    const double ax = cx - r * std::cos(phase_zone);
-    const double ay = cy - r * std::sin(phase_zone);
-    const Eigen::Vector3d pred_xyz(ax, ay, z_use);
-    const Eigen::Vector3d pred_ypd = tools::xyz2ypd(pred_xyz);
-
-    const double e_armor_yaw = std::abs(tools::limit_rad(obs_armor_yaw - phase_zone));
-    const double e_yaw = std::abs(tools::limit_rad(obs_ypd[0] - pred_ypd[0]));
-    const double e_pitch = std::abs(tools::limit_rad(obs_ypd[1] - pred_ypd[1]));
-    const double e_dist = std::abs(obs_ypd[2] - pred_ypd[2]) / std::max(1.0, obs_ypd[2]);
-
-    double cost = w_armor_yaw * e_armor_yaw + w_yaw * e_yaw + w_pitch * e_pitch + w_dist * e_dist;
-
-    // 如果该 zone 已有 z 值，检查 z 差异。差异大 = 不太可能是这个 zone
-    if (zone_z_initialized_[zone]) {
-      const double e_z = std::abs(obs_z - zone_z_[zone]);
-      cost += w_z * e_z;
-    }
-
-    // 滞回：偏向维持当前 zone，减少边界处抖动（尤其是低->高那类突变附近）
-    if (zone == current_zone_) cost -= bonus_hold_zone;
-
-    // 若 omega 已相对可靠，则更偏向匹配“当前或下一块”，弱化反方向上一块
-    if (expected_next_zone != -1) {
-      if (zone == expected_next_zone) cost -= bonus_next_zone;
-      if (zone == expected_prev_zone) cost += penalty_prev_zone;
-    }
-
-    if (cost < best_cost) {
-      best_cost = cost;
-      best_zone = zone;
-    }
-  }
-
-  return best_zone;
-}
-
-void OutpostTarget::update_omega_from_observation(
-  int zone, double armor_yaw, std::chrono::steady_clock::time_point t)
-{
-  if (zone < 0 || zone >= 3 || !ekf_initialized_) return;
-
-  if (!last_zone_yaw_initialized_[zone]) {
-    last_zone_yaw_[zone] = armor_yaw;
-    last_zone_time_[zone] = t;
-    last_zone_yaw_initialized_[zone] = true;
-    return;
-  }
-
-  const double dt = tools::delta_time(t, last_zone_time_[zone]);
-  if (dt <= 0.0 || dt > 0.1) {
-    last_zone_yaw_[zone] = armor_yaw;
-    last_zone_time_[zone] = t;
-    return;
-  }
-
-  const double dyaw = tools::limit_rad(armor_yaw - last_zone_yaw_[zone]);
-  const double omega_meas = dyaw / dt;
-
-  // 只在尚未稳定前（或 omega 很离谱时）用观测来拉一把；避免稳定后被噪声扰动
-  const bool not_converged = update_count_ < 8;
-  const bool omega_bad = std::abs(ekf_.x[5]) > 6.0;
-  if (not_converged || omega_bad) {
-    const double beta = not_converged ? 0.35 : 0.15;
-    ekf_.x[5] = (1.0 - beta) * ekf_.x[5] + beta * omega_meas;
-  }
-
-  last_zone_yaw_[zone] = armor_yaw;
-  last_zone_time_[zone] = t;
-}
-
-void OutpostTarget::update_zone(const Armor & armor, int zone)
-{
-  double observed_z = armor.xyz_in_world[2];
-
-  // 更新该 zone 的 z 值
-  if (!zone_z_initialized_[zone]) {
-    zone_z_[zone] = observed_z;
-    zone_z_initialized_[zone] = true;
-  } else {
-    // 高/中/低在切换时会突变，误关联一次会把该层高度污染很久。
-    // 用门限拒绝明显不合理的 z 跳变（z_gate 可在 yaml 里配置 outpost_z_gate）。
-    if (std::abs(observed_z - zone_z_[zone]) > outpost_z_gate_) {
-      tools::logger()->debug(
-        "[OutpostTarget] Reject z update: zone={}, z_obs={:.3f}, z_hist={:.3f}", zone, observed_z,
-        zone_z_[zone]);
-    } else {
-      double alpha = 0.1;
-      zone_z_[zone] = zone_z_[zone] * (1 - alpha) + observed_z * alpha;
-    }
-  }
-
-  // 该 zone 的 phase 偏移
-  double phase_offset = zone * 2 * M_PI / 3;
-
   // 观测量: [yaw, pitch, distance, armor_yaw]
   const Eigen::VectorXd & ypd = armor.ypd_in_world;
   const Eigen::VectorXd & ypr = armor.ypr_in_world;
@@ -250,36 +121,31 @@ void OutpostTarget::update_zone(const Armor & armor, int zone)
   // 状态: [cx, vx, cy, vy, phase0, omega, radius]
   double cx = ekf_.x[0], cy = ekf_.x[2];
   double phase0 = ekf_.x[4], r = ekf_.x[6];
-  double phase_zone = tools::limit_rad(phase0 + phase_offset);
 
-  double armor_x = cx - r * std::cos(phase_zone);
-  double armor_y = cy - r * std::sin(phase_zone);
-  double armor_z = zone_z_[zone];
-  Eigen::Vector3d armor_xyz(armor_x, armor_y, armor_z);
+  // 预测装甲板位置（使用 phase0，即装甲板 0 的角度）
+  double armor_x = cx - r * std::cos(phase0);
+  double armor_y = cy - r * std::sin(phase0);
+  Eigen::Vector3d armor_xyz(armor_x, armor_y, observed_z_);
 
-  // H_xyz_state: 装甲板xy对状态的雅可比 (2x7)
-  // 状态: [cx, vx, cy, vy, phase0, omega, radius]
-  // armor_x = cx - r * cos(phase0 + offset)
-  // armor_y = cy - r * sin(phase0 + offset)
-  // d(armor_x)/d(cx) = 1, d(armor_x)/d(phase0) = r * sin(phase_zone), d(armor_x)/d(r) = -cos(phase_zone)
-  // d(armor_y)/d(cy) = 1, d(armor_y)/d(phase0) = -r * cos(phase_zone), d(armor_y)/d(r) = -sin(phase_zone)
-
-  // 完整的 xyz 对状态的雅可比 (3x7)，z 行全为 0（因为 z 不在 EKF 状态中）
+  // H_xyz_state: 装甲板xy对状态的雅可比 (3x7)
+  // armor_x = cx - r * cos(phase0)
+  // armor_y = cy - r * sin(phase0)
+  // d(armor_x)/d(cx) = 1, d(armor_x)/d(phase0) = r * sin(phase0), d(armor_x)/d(r) = -cos(phase0)
+  // d(armor_y)/d(cy) = 1, d(armor_y)/d(phase0) = -r * cos(phase0), d(armor_y)/d(r) = -sin(phase0)
   // clang-format off
   Eigen::MatrixXd H_xyz_state(3, 7);
   H_xyz_state <<
-    1, 0, 0, 0,  r * std::sin(phase_zone), 0, -std::cos(phase_zone),
-    0, 0, 1, 0, -r * std::cos(phase_zone), 0, -std::sin(phase_zone),
-    0, 0, 0, 0,                         0, 0,                     0;
+    1, 0, 0, 0,  r * std::sin(phase0), 0, -std::cos(phase0),
+    0, 0, 1, 0, -r * std::cos(phase0), 0, -std::sin(phase0),
+    0, 0, 0, 0,                     0, 0,                 0;  // z 不在状态中
   // clang-format on
 
   Eigen::MatrixXd H_ypd_xyz = tools::xyz2ypd_jacobian(armor_xyz);
 
-  // 完整的观测雅可比 (4x7): [yaw, pitch, distance, armor_yaw] 对 [cx, vx, cy, vy, phase0, omega, r]
+  // 完整的观测雅可比 (4x7): [yaw, pitch, distance, armor_yaw] 对状态
   Eigen::MatrixXd H = Eigen::MatrixXd::Zero(4, 7);
   H.block<3, 7>(0, 0) = H_ypd_xyz * H_xyz_state;
-  // d(armor_yaw)/d(phase0) = 1 (因为 armor_yaw = phase0 + offset)
-  H(3, 4) = 1;
+  H(3, 4) = 1;  // d(armor_yaw)/d(phase0) = 1
 
   // 观测噪声
   auto center_yaw = std::atan2(armor.xyz_in_world[1], armor.xyz_in_world[0]);
@@ -287,6 +153,11 @@ void OutpostTarget::update_zone(const Armor & armor, int zone)
   Eigen::VectorXd R_dig(4);
   R_dig << 4e-3, 4e-3, std::log(std::abs(delta_angle) + 1) + 1,
     std::log(std::abs(armor.ypd_in_world[2]) + 1) / 200 + 9e-2;
+
+  // 高度切换/抖动期：降低 pitch 这维观测的影响，避免拖拽平面状态/相位
+  if (!pitch_stable()) {
+    R_dig[1] *= pitch_unstable_r_scale_;
+  }
   Eigen::MatrixXd R = R_dig.asDiagonal();
 
   auto z_subtract = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
@@ -300,20 +171,39 @@ void OutpostTarget::update_zone(const Armor & armor, int zone)
   auto h_func = [&](const Eigen::VectorXd & x) -> Eigen::Vector4d {
     double cx_ = x[0], cy_ = x[2];
     double phase0_ = x[4], r_ = x[6];
-    double phase_zone_ = tools::limit_rad(phase0_ + phase_offset);
 
-    double ax = cx_ - r_ * std::cos(phase_zone_);
-    double ay = cy_ - r_ * std::sin(phase_zone_);
-    double az = zone_z_[zone];  // z 直接用记录的值
+    double ax = cx_ - r_ * std::cos(phase0_);
+    double ay = cy_ - r_ * std::sin(phase0_);
+    double az = observed_z_;  // 直接用观测 z
 
     Eigen::Vector3d xyz(ax, ay, az);
     Eigen::Vector3d ypd_pred = tools::xyz2ypd(xyz);
 
-    return {ypd_pred[0], ypd_pred[1], ypd_pred[2], phase_zone_};
+    return {ypd_pred[0], ypd_pred[1], ypd_pred[2], phase0_};
   };
 
   ekf_.update(z_obs, H, R, h_func, z_subtract);
   update_count_++;
+}
+
+void OutpostTarget::update_pitch_tracking(double pitch)
+{
+  pitch_history_.push_back(pitch);
+  if (pitch_history_.size() > PITCH_HISTORY_SIZE) {
+    pitch_history_.pop_front();
+  }
+
+  // 计算 pitch 变化幅度（最大值 - 最小值）
+  if (pitch_history_.size() >= 3) {
+    double min_pitch = *std::min_element(pitch_history_.begin(), pitch_history_.end());
+    double max_pitch = *std::max_element(pitch_history_.begin(), pitch_history_.end());
+    pitch_variation_ = max_pitch - min_pitch;
+  }
+}
+
+bool OutpostTarget::pitch_stable() const
+{
+  return pitch_variation_ < pitch_stable_threshold_;
 }
 
 bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_point t)
@@ -325,39 +215,35 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
   temp_lost_count_ = 0;
   priority = armor.priority;
 
-  tools::logger()->debug(
-    "[OutpostTarget] Observed armor: xyz=({:.3f}, {:.3f}, {:.3f}), yaw={:.3f}",
-    armor.xyz_in_world[0], armor.xyz_in_world[1], armor.xyz_in_world[2], armor.ypr_in_world[0]);
+  // 更新 pitch 追踪（用于判断是否处于高度切换/抖动期）
+  update_pitch_tracking(armor.ypd_in_world[1]);
+
+  // 更新观测 z（滑动平均）：稳定期快速跟随；不稳定期保守更新，避免多高度混入振荡。
+  const double obs_z = armor.xyz_in_world[2];
+  if (!observed_z_valid_) {
+    observed_z_ = obs_z;
+    observed_z_valid_ = true;
+  } else {
+    const double alpha = pitch_stable() ? observed_z_alpha_stable_ : observed_z_alpha_unstable_;
+    observed_z_ = observed_z_ * (1.0 - alpha) + obs_z * alpha;
+  }
 
   if (state_ == OutpostState::LOST) {
     init_ekf(armor);
-    current_zone_ = 0;
     state_ = OutpostState::TRACKING;
     last_update_time_ = t;
     return true;
   }
 
-  // 先 predict 到当前时刻，再 update
+  // 先 predict 到当前时刻
   double dt = tools::delta_time(t, last_update_time_);
   if (dt > 0 && dt < 0.1) {
     predict(dt);
   }
   last_update_time_ = t;
 
-  // 基于预测残差关联 zone，比固定相位区间更稳
-  int zone = match_zone(armor);
-
-  if (zone != current_zone_) {
-    jumped = true;
-    tools::logger()->debug("[OutpostTarget] Jumped from zone {} to zone {}", current_zone_, zone);
-  }
-  current_zone_ = zone;
-  last_id = zone;
-
-  // 用当前观测差分辅助 omega 初始/纠偏
-  update_omega_from_observation(zone, armor.ypr_in_world[0], t);
-
-  update_zone(armor, zone);
+  // 更新 EKF
+  update_ekf(armor);
 
   return true;
 }
@@ -375,9 +261,9 @@ void OutpostTarget::predict(std::chrono::steady_clock::time_point t)
   last_update_time_ = t;
   temp_lost_count_++;
 
-  // 丢失一段时间后，omega 逐渐衰减到 0，避免持续旋转预测
+  // 丢失一段时间后，omega 逐渐衰减
   if (temp_lost_count_ > 5) {
-    ekf_.x[5] *= 0.92;  // 每帧衰减 8%，约 10 帧后衰减到原来的 43%
+    ekf_.x[5] *= 0.92;
   }
 
   if (temp_lost_count_ > max_temp_lost_count_) {
@@ -427,7 +313,7 @@ void OutpostTarget::predict(double dt)
     return x_prior;
   };
 
-  // 限制角速度范围 (omega is at index 5)
+  // 限制角速度范围
   if (update_count_ > 10 && std::abs(ekf_.x[5]) > 2.51) {
     ekf_.x[5] = ekf_.x[5] > 0 ? 2.51 : -2.51;
   }
@@ -435,23 +321,21 @@ void OutpostTarget::predict(double dt)
   ekf_.predict(F, Q, f);
 }
 
-Eigen::Vector4d OutpostTarget::armor_xyza(int zone) const
+Eigen::Vector4d OutpostTarget::armor_xyza(int i) const
 {
   if (!ekf_initialized_) return {0, 0, 0, 0};
 
-  // 状态: [cx, vx, cy, vy, phase0, omega, radius]
   double cx = ekf_.x[0], cy = ekf_.x[2];
   double phase0 = ekf_.x[4], r = ekf_.x[6];
 
-  double phase_zone = tools::limit_rad(phase0 + zone * 2 * M_PI / 3);
+  // 第 i 个装甲板的角度
+  double angle = tools::limit_rad(phase0 + i * 2 * M_PI / 3);
 
-  double armor_x = cx - r * std::cos(phase_zone);
-  double armor_y = cy - r * std::sin(phase_zone);
+  double armor_x = cx - r * std::cos(angle);
+  double armor_y = cy - r * std::sin(angle);
+  double armor_z = observed_z_;  // 所有装甲板用同一个观测 z
 
-  // z 直接用该 zone 记录的值
-  double armor_z = zone_z_initialized_[zone] ? zone_z_[zone] : zone_z_[current_zone_];
-
-  return {armor_x, armor_y, armor_z, phase_zone};
+  return {armor_x, armor_y, armor_z, angle};
 }
 
 std::vector<Eigen::Vector4d> OutpostTarget::armor_xyza_list() const
@@ -462,21 +346,10 @@ std::vector<Eigen::Vector4d> OutpostTarget::armor_xyza_list() const
     return list;
   }
 
-  // 返回所有已初始化 z 的 zone
+  // 返回三个装甲板
   for (int i = 0; i < 3; i++) {
-    if (zone_z_initialized_[i]) {
-      list.push_back(armor_xyza(i));
-    }
+    list.push_back(armor_xyza(i));
   }
-
-  // 如果没有任何 zone 初始化，返回当前 zone
-  if (list.empty()) {
-    list.push_back(armor_xyza(current_zone_));
-  }
-
-  tools::logger()->debug(
-    "[OutpostTarget] armor_xyza_list: size={}, zones_initialized=[{},{},{}]",
-    list.size(), zone_z_initialized_[0], zone_z_initialized_[1], zone_z_initialized_[2]);
 
   return list;
 }
@@ -491,10 +364,10 @@ Eigen::VectorXd OutpostTarget::ekf_x() const
   }
 
   // 7维状态: [cx, vx, cy, vy, phase0, omega, radius]
-  // 转换为Target兼容的11维状态: [cx, vx, cy, vy, z, vz, phase, omega, radius, l, h]
-  // z 用当前 zone 的值
-  double z = zone_z_initialized_[current_zone_] ? zone_z_[current_zone_] : 0;
-  x << ekf_.x[0], ekf_.x[1], ekf_.x[2], ekf_.x[3], z, 0, ekf_.x[4], ekf_.x[5], ekf_.x[6], 0, 0;
+  // 转换为11维: [cx, vx, cy, vy, z, vz, phase, omega, radius, l, h]
+  x << ekf_.x[0], ekf_.x[1], ekf_.x[2], ekf_.x[3],
+       observed_z_, 0,  // z 用观测值，vz = 0
+       ekf_.x[4], ekf_.x[5], ekf_.x[6], 0, 0;
   return x;
 }
 
@@ -502,7 +375,6 @@ bool OutpostTarget::diverged() const
 {
   if (!ekf_initialized_) return false;
 
-  // 状态: [cx, vx, cy, vy, phase0, omega, radius]
   double r = ekf_.x[6];
   if (r < 0.1 || r > 0.5) return true;
 

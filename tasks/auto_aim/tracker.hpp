@@ -34,6 +34,11 @@ public:
   bool is_outpost_tracking() const { return is_tracking_outpost_ && outpost_target_.is_tracking(); }
   const OutpostTarget & outpost_target() const { return outpost_target_; }
 
+  // 前哨站 pitch 稳定性 (用于判断是否允许开火)
+  bool outpost_pitch_stable() const {
+    return is_tracking_outpost_ && outpost_target_.pitch_stable();
+  }
+
 private:
   Solver & solver_;
   Color enemy_color_;

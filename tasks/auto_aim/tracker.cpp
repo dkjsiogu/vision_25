@@ -52,8 +52,10 @@ std::list<Target> Tracker::track(
   bool has_outpost = std::any_of(
     armors.begin(), armors.end(), [](const Armor & a) { return a.name == ArmorName::outpost; });
 
-  // 前哨站现在用普通 Target 追踪，不再使用 OutpostTarget
-  // 移除前哨站专用追踪逻辑，统一走下面的正常流程
+  // 前哨站使用专用追踪器
+  if (is_tracking_outpost_ || has_outpost) {
+    return handle_outpost(armors, t) ? std::list<Target>{outpost_to_target(t)} : std::list<Target>{};
+  }
 
   // 非前哨站目标的正常追踪逻辑
 
@@ -87,7 +89,7 @@ std::list<Target> Tracker::track(
     return {};
   }
 
-  // 收敛效果检测：
+  // 收敛效果检测
   if (
     std::accumulate(
       target_.ekf().recent_nis_failures.begin(), target_.ekf().recent_nis_failures.end(), 0) >=
@@ -253,12 +255,7 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
     target_ = Target(armor, t, 0.2, 2, P0_dig);
   }
 
-  // 前哨站：用普通 Target，三个装甲板，观测 z 来修正高度
-  else if (armor.name == ArmorName::outpost) {
-    // z 的初始协方差设大一些（81），因为高度会随装甲板切换变化
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
-    target_ = Target(armor, t, 0.2765, 3, P0_dig);
-  }
+  // 前哨站使用 OutpostTarget，不走这里
 
   else if (armor.name == ArmorName::base) {
     Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0}};
@@ -315,11 +312,8 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
 
   // 如果没有前哨站装甲板
   if (outpost_armors.empty()) {
-    // 如果正在追踪前哨站，进行预测
     if (is_tracking_outpost_ && outpost_target_.state() == OutpostState::TRACKING) {
       outpost_target_.predict(t);
-      // 检查丢失计数 (这里简化处理，依赖OutpostTarget内部状态)
-      // 如果OutpostTarget状态变为非TRACKING，则重置
       if (outpost_target_.state() != OutpostState::TRACKING) {
         tools::logger()->info("[Tracker] Outpost target lost");
         is_tracking_outpost_ = false;
@@ -327,13 +321,9 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
         return false;
       }
       state_ = "temp_lost";
-      // 关键：前哨站丢失时不要继续输出预测 target。
-      // 否则 Planner 会持续给出 yaw 目标，导致云台在没有观测约束时“自转到一侧”。
-      // 这里仍保留内部 predict，便于短暂丢帧后快速重捕获。
-      return false;
+      return false;  // 丢失时不输出，避免云台乱转
     }
 
-    // 否则退出前哨站追踪模式
     if (is_tracking_outpost_) {
       tools::logger()->info("[Tracker] Exit outpost tracking mode");
       is_tracking_outpost_ = false;
@@ -343,58 +333,36 @@ bool Tracker::handle_outpost(std::list<Armor> & armors, std::chrono::steady_cloc
     return false;
   }
 
-  // 有前哨站装甲板，更新追踪
+  // 有前哨站装甲板
   is_tracking_outpost_ = true;
 
-  // 选择最靠近图像中心的装甲板
+  // 选择最靠近图像中心的装甲板更新
   outpost_armors.sort([](const Armor & a, const Armor & b) {
     cv::Point2f img_center(1440 / 2, 1080 / 2);
     return cv::norm(a.center - img_center) < cv::norm(b.center - img_center);
   });
 
-  // 同帧可能观测到 2~3 块装甲板：全部用于更新（更快填满 3 个高度/更稳估计 omega）。
-  // 为了让 current_zone 更稳定，最后一次更新使用最靠近图像中心的装甲板。
-  bool tracking = false;
-  if (!outpost_armors.empty()) {
-    auto best_armor = outpost_armors.front();
-    outpost_armors.pop_front();
+  bool tracking = outpost_target_.update(outpost_armors.front(), t);
 
-    for (auto & a : outpost_armors) {
-      tracking = outpost_target_.update(a, t) || tracking;
-    }
-    tracking = outpost_target_.update(best_armor, t) || tracking;
-  }
-
-  // 更新Tracker状态以匹配OutpostTarget状态
-  switch (outpost_target_.state()) {
-    case OutpostState::LOST:
-      state_ = "lost";
-      break;
-    case OutpostState::TRACKING:
-      state_ = "tracking";
-      break;
-  }
+  // 更新状态
+  state_ = (outpost_target_.state() == OutpostState::TRACKING) ? "tracking" : "lost";
 
   return tracking;
 }
 
 Target Tracker::outpost_to_target(std::chrono::steady_clock::time_point t) const
 {
-  // 将OutpostTarget转换为Target以兼容现有Aimer/Planner接口
   auto ekf_x = outpost_target_.ekf_x();
   auto armor_list = outpost_target_.armor_xyza_list();
-  auto zone_z = outpost_target_.zone_z_list();  // 各 zone 的 z 值
-  auto initialized_zones = outpost_target_.initialized_zones();  // 已初始化的 zone
 
-  // 调试：输出转换前的信息
+  // 调试日志
   tools::logger()->debug(
-    "[Tracker] outpost_to_target: ekf_z={:.3f}, armor_list_size={}, initialized_zones_size={}, zone_z=[{:.3f}, {:.3f}, {:.3f}]",
-    ekf_x[4], armor_list.size(), initialized_zones.size(),
-    zone_z.size() > 0 ? zone_z[0] : 0.0,
-    zone_z.size() > 1 ? zone_z[1] : 0.0,
-    zone_z.size() > 2 ? zone_z[2] : 0.0);
+    "[Tracker] outpost_to_target: z={:.3f}, pitch_var={:.4f}, stable={}",
+    outpost_target_.observed_z(),
+    outpost_target_.pitch_variation(),
+    outpost_target_.pitch_stable() ? "yes" : "no");
 
-  return Target(
+  auto target = Target(
     ArmorName::outpost,
     ArmorType::small,
     outpost_target_.priority,
@@ -403,10 +371,12 @@ Target Tracker::outpost_to_target(std::chrono::steady_clock::time_point t) const
     ekf_x,
     armor_list,
     3,  // 前哨站3个装甲板
-    t,  // 传递帧时间戳！
-    zone_z,  // 传递各 zone 的 z 值
-    initialized_zones  // 传递已初始化的 zone
+    t
   );
+
+  // 前哨站：pitch 不稳定时禁止开火，但继续输出 yaw/pitch 进行跟踪。
+  target.shoot_allowed = outpost_target_.pitch_stable();
+  return target;
 }
 
 }  // namespace auto_aim

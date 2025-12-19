@@ -23,6 +23,10 @@ public:
   bool jumped;
   int last_id;  // debug only
 
+  // 上层可用于限制是否允许开火（不影响跟踪与解算）。
+  // 典型用途：前哨站高度切换导致 pitch 抖动时，禁止开火但继续跟踪。
+  bool shoot_allowed = true;
+
   Target() = default;
   Target(
     const Armor & armor, std::chrono::steady_clock::time_point t, double radius, int armor_num,

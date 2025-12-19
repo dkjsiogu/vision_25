@@ -22,8 +22,12 @@ bool Shooter::shoot(
 {
   if (!command.control || targets.empty() || !auto_fire_) return false;
 
-  auto target_x = targets.front().ekf_x()[0];
-  auto target_y = targets.front().ekf_x()[2];
+  // 前哨站等特殊目标：上层可通过 Target::shoot_allowed 禁止开火。
+  const auto & target0 = targets.front();
+  if (!target0.shoot_allowed) return false;
+
+  auto target_x = target0.ekf_x()[0];
+  auto target_y = target0.ekf_x()[2];
   auto tolerance = std::sqrt(tools::square(target_x) + tools::square(target_y)) > judge_distance_
                      ? second_tolerance_
                      : first_tolerance_;

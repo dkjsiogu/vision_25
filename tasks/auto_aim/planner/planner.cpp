@@ -90,6 +90,11 @@ Plan Planner::plan(Target target, double bullet_speed)
       traj(0, HALF_HORIZON + shoot_offset_) - yaw_solver_->work->x(0, HALF_HORIZON + shoot_offset_),
       traj(2, HALF_HORIZON + shoot_offset_) -
         pitch_solver_->work->x(0, HALF_HORIZON + shoot_offset_)) < fire_thresh_;
+
+  // 上层可通过 Target::shoot_allowed 禁止开火（例如：前哨站高度切换导致 pitch 抖动）。
+  if (!target.shoot_allowed) {
+    plan.fire = false;
+  }
   return plan;
 }
 
