@@ -54,6 +54,10 @@ int main(int argc, char * argv[])
   auto mode = io::Mode::idle;
   auto last_mode = io::Mode::idle;
 
+  io::Command last_sent_cmd{false, false, 0, 0};
+  bool has_last_sent_cmd = false;
+  bool last_control = false;
+
   while (!exiter.exit()) {
     camera.read(img, t);
     q = cboard.imu_at(t - 1ms);
@@ -76,7 +80,25 @@ int main(int argc, char * argv[])
 
     auto command = aimer.aim(targets, t, cboard.bullet_speed);
 
-    cboard.send(command);
+    if (command.control) {
+      cboard.send(command);
+      last_sent_cmd = command;
+      has_last_sent_cmd = true;
+      last_control = true;
+    } else {
+      // 某些下位机会在 control=false 时仍读取 yaw/pitch。
+      // 若此时发送默认 0，会导致云台跳转到固定角度（常见表现为“开自瞄疯转到一侧”）。
+      // 处理策略：
+      // - 从未进入过 control=true：不发送
+      // - control=true -> false：发送一次释放帧，yaw/pitch 维持最后一次指令
+      if (last_control && has_last_sent_cmd) {
+        command.shoot = false;
+        command.yaw = last_sent_cmd.yaw;
+        command.pitch = last_sent_cmd.pitch;
+        cboard.send(command);
+      }
+      last_control = false;
+    }
   }
 
   return 0;

@@ -64,6 +64,10 @@ int main(int argc, char * argv[])
   auto mode = io::Mode::idle;
   auto last_mode = io::Mode::idle;
 
+  io::Command last_sent_cmd{false, false, 0, 0};
+  bool has_last_sent_cmd = false;
+  bool last_control = false;
+
   while (!exiter.exit()) {
     camera.read(img, t);
     q = cboard.imu_at(t - 1ms);
@@ -88,7 +92,20 @@ int main(int argc, char * argv[])
 
       command.shoot = shooter.shoot(command, aimer, targets, ypr);
 
-      cboard.send(command);
+      if (command.control) {
+        cboard.send(command);
+        last_sent_cmd = command;
+        has_last_sent_cmd = true;
+        last_control = true;
+      } else {
+        if (last_control && has_last_sent_cmd) {
+          command.shoot = false;
+          command.yaw = last_sent_cmd.yaw;
+          command.pitch = last_sent_cmd.pitch;
+          cboard.send(command);
+        }
+        last_control = false;
+      }
     }
 
     /// 打符

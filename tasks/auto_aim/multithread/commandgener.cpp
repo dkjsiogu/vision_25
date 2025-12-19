@@ -37,6 +37,11 @@ void CommandGener::push(
 void CommandGener::generate_command()
 {
   auto t0 = std::chrono::steady_clock::now();
+
+  io::Command last_sent_cmd{false, false, 0, 0};
+  bool has_last_sent_cmd = false;
+  bool last_control = false;
+
   while (!stop_) {
     std::optional<Input> input;
     {
@@ -54,7 +59,23 @@ void CommandGener::generate_command()
                                    : std::sqrt(
                                        tools::square(input->targets_.front().ekf_x()[0]) +
                                        tools::square(input->targets_.front().ekf_x()[2]));
-      cboard_.send(command);
+
+      if (command.control) {
+        cboard_.send(command);
+        last_sent_cmd = command;
+        has_last_sent_cmd = true;
+        last_control = true;
+      } else {
+        // 避免 control=false 时下位机仍读取 yaw/pitch 导致跳转到 0。
+        if (last_control && has_last_sent_cmd) {
+          command.shoot = false;
+          command.yaw = last_sent_cmd.yaw;
+          command.pitch = last_sent_cmd.pitch;
+          cboard_.send(command);
+        }
+        last_control = false;
+      }
+
       if (debug_) {
         nlohmann::json data;
         data["t"] = tools::delta_time(std::chrono::steady_clock::now(), t0);

@@ -207,6 +207,22 @@ AimPoint Aimer::choose_aim_point(const Target & target)
     leaving_angle = leaving_angle_;
   }
 
+  // 前哨站 omega 接近 0 时（初始化阶段或静止），选择最正对的装甲板
+  if (target.name == ArmorName::outpost && std::abs(ekf_x[7]) < 0.5) {
+    int best_id = 0;
+    double min_angle = 1e10;
+    for (int i = 0; i < armor_num; i++) {
+      if (std::abs(delta_angle_list[i]) > coming_angle) continue;
+      if (std::abs(delta_angle_list[i]) < min_angle) {
+        min_angle = std::abs(delta_angle_list[i]);
+        best_id = i;
+      }
+    }
+    if (min_angle < 1e10) {
+      return {true, armor_xyza_list[best_id]};
+    }
+  }
+
   // 在小陀螺时，一侧的装甲板不断出现，另一侧的装甲板不断消失，显然前者被打中的概率更高
   for (int i = 0; i < armor_num; i++) {
     if (std::abs(delta_angle_list[i]) > coming_angle) continue;
