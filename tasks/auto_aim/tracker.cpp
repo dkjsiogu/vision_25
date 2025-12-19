@@ -52,10 +52,8 @@ std::list<Target> Tracker::track(
   bool has_outpost = std::any_of(
     armors.begin(), armors.end(), [](const Armor & a) { return a.name == ArmorName::outpost; });
 
-  // 如果正在追踪前哨站，或者检测到前哨站装甲板，使用前哨站专用追踪
-  if (is_tracking_outpost_ || has_outpost) {
-    return handle_outpost(armors, t) ? std::list<Target>{outpost_to_target(t)} : std::list<Target>{};
-  }
+  // 前哨站现在用普通 Target 追踪，不再使用 OutpostTarget
+  // 移除前哨站专用追踪逻辑，统一走下面的正常流程
 
   // 非前哨站目标的正常追踪逻辑
 
@@ -255,8 +253,12 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
     target_ = Target(armor, t, 0.2, 2, P0_dig);
   }
 
-  // 前哨站使用专用追踪器，不走这里
-  // else if (armor.name == ArmorName::outpost) { ... }
+  // 前哨站：用普通 Target，三个装甲板，观测 z 来修正高度
+  else if (armor.name == ArmorName::outpost) {
+    // z 的初始协方差设大一些（81），因为高度会随装甲板切换变化
+    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
+    target_ = Target(armor, t, 0.2765, 3, P0_dig);
+  }
 
   else if (armor.name == ArmorName::base) {
     Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0}};

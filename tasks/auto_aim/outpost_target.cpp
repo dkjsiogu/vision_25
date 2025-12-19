@@ -102,6 +102,21 @@ int OutpostTarget::match_zone(const Armor & armor) const
   // 初始化阶段：只有一个观测，直接当 zone 0
   if (!ekf_initialized_) return 0;
 
+  // 基于当前估计的角速度方向，预测“下一块”更可能出现在哪个 zone。
+  // 目的：在相位边界抖动、或高度观测偶发异常时，提供一个很轻的关联先验。
+  // 注意：只在 omega 已经相对可信时启用，避免早期误导。
+  const bool has_valid_current_zone = (current_zone_ >= 0 && current_zone_ < 3);
+  const double omega = ekf_.x[5];
+  const bool omega_reliable = (update_count_ >= 6) && (std::abs(omega) > 0.3);
+
+  int expected_next_zone = -1;
+  int expected_prev_zone = -1;
+  if (has_valid_current_zone && omega_reliable) {
+    // omega>0: 相位递增方向，下一块是 zone+1；omega<0: 相位递减方向，下一块是 zone-1
+    expected_next_zone = (omega > 0.0) ? (current_zone_ + 1) % 3 : (current_zone_ + 2) % 3;
+    expected_prev_zone = (omega > 0.0) ? (current_zone_ + 2) % 3 : (current_zone_ + 1) % 3;
+  }
+
   // 观测量
   const double obs_armor_yaw = armor.ypr_in_world[0];
   const Eigen::Vector3d obs_ypd = armor.ypd_in_world;
@@ -117,6 +132,12 @@ int OutpostTarget::match_zone(const Armor & armor) const
   constexpr double w_yaw = 1.0;
   constexpr double w_pitch = 0.3;
   constexpr double w_dist = 0.1;
+  constexpr double w_z = 5.0;  // z 值差异的权重，用于区分三层
+
+  // 旋转方向先验：数值要“轻”，只负责打破近似平局，不应压过真实观测残差。
+  constexpr double bonus_hold_zone = 0.06;
+  constexpr double bonus_next_zone = 0.035;
+  constexpr double penalty_prev_zone = 0.02;
 
   int best_zone = 0;
   double best_cost = 1e100;
@@ -138,8 +159,20 @@ int OutpostTarget::match_zone(const Armor & armor) const
 
     double cost = w_armor_yaw * e_armor_yaw + w_yaw * e_yaw + w_pitch * e_pitch + w_dist * e_dist;
 
+    // 如果该 zone 已有 z 值，检查 z 差异。差异大 = 不太可能是这个 zone
+    if (zone_z_initialized_[zone]) {
+      const double e_z = std::abs(obs_z - zone_z_[zone]);
+      cost += w_z * e_z;
+    }
+
     // 滞回：偏向维持当前 zone，减少边界处抖动（尤其是低->高那类突变附近）
-    if (zone == current_zone_) cost -= 0.05;
+    if (zone == current_zone_) cost -= bonus_hold_zone;
+
+    // 若 omega 已相对可靠，则更偏向匹配“当前或下一块”，弱化反方向上一块
+    if (expected_next_zone != -1) {
+      if (zone == expected_next_zone) cost -= bonus_next_zone;
+      if (zone == expected_prev_zone) cost += penalty_prev_zone;
+    }
 
     if (cost < best_cost) {
       best_cost = cost;
@@ -200,8 +233,8 @@ void OutpostTarget::update_zone(const Armor & armor, int zone)
         "[OutpostTarget] Reject z update: zone={}, z_obs={:.3f}, z_hist={:.3f}", zone, observed_z,
         zone_z_[zone]);
     } else {
-    double alpha = 0.1;
-    zone_z_[zone] = zone_z_[zone] * (1 - alpha) + observed_z * alpha;
+      double alpha = 0.1;
+      zone_z_[zone] = zone_z_[zone] * (1 - alpha) + observed_z * alpha;
     }
   }
 
@@ -341,6 +374,11 @@ void OutpostTarget::predict(std::chrono::steady_clock::time_point t)
   predict(dt);
   last_update_time_ = t;
   temp_lost_count_++;
+
+  // 丢失一段时间后，omega 逐渐衰减到 0，避免持续旋转预测
+  if (temp_lost_count_ > 5) {
+    ekf_.x[5] *= 0.92;  // 每帧衰减 8%，约 10 帧后衰减到原来的 43%
+  }
 
   if (temp_lost_count_ > max_temp_lost_count_) {
     tools::logger()->info("[OutpostTarget] Lost (temp_lost_count > {})", max_temp_lost_count_);

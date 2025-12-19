@@ -64,6 +64,9 @@ private:
   std::vector<Eigen::Vector4d> external_armor_list_;  // 外部提供的装甲板列表
   bool use_external_armor_list_ = false;
 
+  double observed_z_ = 0.0;       // 前哨站：最近观测到的 z 值
+  bool observed_z_valid_ = false; // 观测 z 是否有效
+
   tools::ExtendedKalmanFilter ekf_;
   std::chrono::steady_clock::time_point t_;
 

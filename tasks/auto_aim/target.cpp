@@ -173,6 +173,18 @@ void Target::predict(double dt)
 
 void Target::update(const Armor & armor)
 {
+  // 前哨站：记录观测到的 z 值（滑动平均）
+  if (name == ArmorName::outpost) {
+    double obs_z = armor.xyz_in_world[2];
+    if (!observed_z_valid_) {
+      observed_z_ = obs_z;
+      observed_z_valid_ = true;
+    } else {
+      // 滑动平均，快速跟随高度变化
+      observed_z_ = observed_z_ * 0.3 + obs_z * 0.7;
+    }
+  }
+
   // 装甲板匹配
   int id;
   auto min_angle_error = 1e10;
@@ -322,12 +334,10 @@ Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
   auto armor_x = x[0] - r * std::cos(angle);
   auto armor_y = x[2] - r * std::sin(angle);
 
-  // 前哨站特殊处理：3块装甲板在不同高度
+  // 前哨站特殊处理：使用观测到的 z 值，而不是 EKF 估计的 z
   double armor_z;
-  if (name == ArmorName::outpost && !height_offsets_.empty()) {
-    // height_offsets_ 存储的是各 zone 的绝对 z 值（不是偏移量！）
-    int height_idx = std::min(id, static_cast<int>(height_offsets_.size()) - 1);
-    armor_z = height_offsets_[height_idx];  // 直接使用，不加 x[4]
+  if (name == ArmorName::outpost && observed_z_valid_) {
+    armor_z = observed_z_;
   } else {
     armor_z = (use_l_h) ? x[4] + x[10] : x[4];
   }
