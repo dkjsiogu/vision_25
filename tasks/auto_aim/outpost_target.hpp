@@ -72,10 +72,31 @@ public:
 private:
   OutpostState state_ = OutpostState::LOST;
 
-  // EKF: [cx, vx, cy, vy, phase0, omega, radius] (7维)
+  // EKF: [cx, vx, cy, vy, phase0, radius] (6维)
+  // radius 用很小的过程噪声，能缓慢自适应但不会乱跳
   tools::ExtendedKalmanFilter ekf_;
   bool ekf_initialized_ = false;
   int update_count_ = 0;
+
+  // omega 独立估计（不放入 EKF），用于预测 phase0
+  // 使用 PLL + 滑窗回归：比差分+EMA更稳定
+  double omega_est_ = 0.0;
+  double omega_max_abs_ = 2.51;
+
+  // PLL 参数：omega += Kp * phase_error
+  double pll_Kp_ = 8.0;  // 比例增益，越大收敛越快但越容易振荡
+
+  // PLL 辅助状态：缓存本帧 update 前的预测相位，以及用于 dt 计算的时间戳
+  double phase0_pred_before_update_ = 0.0;
+  bool phase0_pred_valid_ = false;
+  std::chrono::steady_clock::time_point last_pll_time_;
+  bool last_pll_time_valid_ = false;
+
+  // 滑窗回归：维护展开相位序列，用最小二乘拟合 omega
+  std::deque<double> unwrapped_phase_history_;
+  std::deque<double> phase_time_history_;
+  double unwrapped_phase_accum_ = 0.0;  // 展开相位累积值
+  static constexpr size_t OMEGA_WINDOW_SIZE = 10;
 
   // 观测 z 值（实时更新，滑动平均）
   double observed_z_ = 0.0;
@@ -94,6 +115,18 @@ private:
   double observed_z_alpha_stable_ = 0.7;
   double observed_z_alpha_unstable_ = 0.2;
 
+  // (x,y) 观测噪声参数：sigma_xy = clamp(base + k * dist, min, max)
+  double sigma_xy_base_ = 0.015;
+  double sigma_xy_k_ = 0.0015;
+  double sigma_xy_min_ = 0.006;
+  double sigma_xy_max_ = 0.06;
+
+  // (x,y) 残差门控：
+  // - 绝对门控：最小残差若仍然过大，则本帧跳过 EKF 更新/omega 更新
+  // - 比值门控：最小残差必须显著优于第二名，避免中心漂移时三个都大但仍选出一个
+  double xy_residual_gate_m_ = 0.18;
+  double xy_residual_ratio_gate_ = 0.7;  // e1/e2 < ratio 才接受
+
   std::chrono::steady_clock::time_point last_update_time_;
 
   int max_temp_lost_count_ = 75;
@@ -103,6 +136,18 @@ private:
   void init_ekf(const Armor & armor);
   void update_ekf(const Armor & armor);
   void update_pitch_tracking(double pitch);
+
+  // 观测辅助：
+  // - 基于 (x,y) 残差选择/对齐当前观测对应的装甲板（避免 120° 切板跳变导致相位不连续）
+  // - 用中心->装甲板向量推回观测相位，辅助估计 omega
+  int meas_plate_id_ = 0;
+  bool meas_valid_ = true;
+  double last_obs_phase_ = 0.0;
+  std::chrono::steady_clock::time_point last_obs_time_;
+  bool last_obs_phase_valid_ = false;
+
+  void align_phase_to_observation_xy(const Armor & armor);
+  void update_omega_from_observation_xy(const Armor & armor, std::chrono::steady_clock::time_point t);
 
   // 计算第 i 个装甲板的位置 (i = 0, 1, 2)
   Eigen::Vector4d armor_xyza(int i) const;
