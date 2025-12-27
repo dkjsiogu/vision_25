@@ -100,6 +100,7 @@ void OutpostTarget::reset()
   unwrapped_phase_history_.clear();
   phase_time_history_.clear();
   unwrapped_phase_accum_ = 0.0;
+  window_base_time_valid_ = false;
 
   phase0_pred_valid_ = false;
   last_pll_time_valid_ = false;
@@ -145,12 +146,27 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
 
   meas_plate_id_ = best_i;
 
-  // 双重门控：
-  // 1. 绝对门控：最小残差不能太大
-  // 2. 比值门控：最小残差必须显著优于第二名（避免中心漂移时三个都大但仍选出一个）
-  const double abs_gate = xy_residual_gate_m_ * xy_residual_gate_m_;
-  const double ratio = (second_err2 > 1e-6) ? (best_err2 / second_err2) : 0.0;
-  meas_valid_ = (best_err2 <= abs_gate) && (ratio < xy_residual_ratio_gate_);
+  // [改进] 智能门控策略：
+  const double abs_gate_sq = xy_residual_gate_m_ * xy_residual_gate_m_;
+  const double ratio = (second_err2 > 1e-9) ? (best_err2 / second_err2) : 0.0;
+
+  // 1. 基础要求：Best 残差必须小于绝对门限
+  bool basic_pass = (best_err2 <= abs_gate_sq);
+
+  // 2. 严格要求：
+  //    情况A: 如果 Best 残差非常小（< 绝对门限的 1/4），说明匹配极好，
+  //           直接通过，不看比值（解决远距离或视角不好时 ratio 误杀问题）
+  //    情况B: 否则，必须满足比值门控（保证区分度）
+  bool rigorous_pass = false;
+  const double trust_threshold_sq = abs_gate_sq * 0.25;
+
+  if (best_err2 < trust_threshold_sq) {
+    rigorous_pass = true;  // 足够可信，豁免 Ratio 检查
+  } else {
+    rigorous_pass = (ratio < xy_residual_ratio_gate_);  // 否则必须通过 Ratio 检查
+  }
+
+  meas_valid_ = basic_pass && rigorous_pass;
 
   if (best_i != 0) {
     jumped = true;
@@ -218,16 +234,28 @@ void OutpostTarget::update_omega_from_observation_xy(
   last_obs_time_ = t;
   last_obs_phase_valid_ = true;
 
-  // 记录到历史队列
-  const double time_sec = std::chrono::duration<double>(t.time_since_epoch()).count();
+  // [改进] 记录到历史队列：使用相对时间避免大数精度损失
+  // 以窗口第一帧为 T=0，后续帧存储相对时间
+  if (unwrapped_phase_history_.empty()) {
+    window_base_time_ = t;
+    window_base_time_valid_ = true;
+  }
+
+  double t_rel = 0.0;
+  if (window_base_time_valid_) {
+    t_rel = tools::delta_time(t, window_base_time_);
+  }
+
   unwrapped_phase_history_.push_back(unwrapped_phase_accum_);
-  phase_time_history_.push_back(time_sec);
+  phase_time_history_.push_back(t_rel);  // 存相对时间！
+
   while (unwrapped_phase_history_.size() > OMEGA_WINDOW_SIZE) {
     unwrapped_phase_history_.pop_front();
     phase_time_history_.pop_front();
   }
 
   // 滑窗回归：拟合 omega = d(phase)/dt
+  // 因为时间是相对值（0.0, 0.01, 0.02...），数值精度极高
   if (unwrapped_phase_history_.size() >= 5) {
     double t_mean = 0, phi_mean = 0;
     const size_t n = unwrapped_phase_history_.size();
@@ -307,6 +335,7 @@ void OutpostTarget::init_ekf(const Armor & armor)
   unwrapped_phase_history_.clear();
   phase_time_history_.clear();
   unwrapped_phase_accum_ = 0.0;
+  window_base_time_valid_ = false;
 
   phase0_pred_valid_ = false;
   last_pll_time_valid_ = false;

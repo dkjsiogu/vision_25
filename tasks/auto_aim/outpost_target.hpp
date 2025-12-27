@@ -94,8 +94,10 @@ private:
 
   // 滑窗回归：维护展开相位序列，用最小二乘拟合 omega
   std::deque<double> unwrapped_phase_history_;
-  std::deque<double> phase_time_history_;
-  double unwrapped_phase_accum_ = 0.0;  // 展开相位累积值
+  std::deque<double> phase_time_history_;  // 存相对时间（避免大数精度损失）
+  double unwrapped_phase_accum_ = 0.0;     // 展开相位累积值
+  std::chrono::steady_clock::time_point window_base_time_;  // 滑窗基准时间
+  bool window_base_time_valid_ = false;
   static constexpr size_t OMEGA_WINDOW_SIZE = 10;
 
   // 观测 z 值（实时更新，滑动平均）
