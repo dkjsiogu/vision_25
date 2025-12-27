@@ -195,13 +195,24 @@ void OutpostTarget::update_omega_from_observation_xy(
   }
 
   // ========== 滑窗回归部分：用展开相位序列拟合 omega ==========
-  // 相位展开：累积相位跳变
+  // [改进] 使用预测先验来计算 delta，支持高转速低帧率（抗混叠）
+  double dt_step = 0.0;
   if (last_obs_phase_valid_) {
-    const double dphase = tools::limit_rad(obs_phase0 - last_obs_phase_);
-    // 跳变门控
-    if (std::abs(dphase) < 1.2) {
-      unwrapped_phase_accum_ += dphase;
-    }
+    dt_step = tools::delta_time(t, last_obs_time_);
+  }
+
+  // 预测增量：基于当前 omega 估计
+  const double pred_dphase = omega_est_ * dt_step;
+  // 去中心化的相位差（观测残差）
+  const double dphase_centered = tools::limit_rad(obs_phase0 - last_obs_phase_ - pred_dphase);
+
+  // [改进] 动态门限：启动期宽容（omega 还没起来），稳定期严格
+  // 0.8 rad ≈ 45度，对于 centred residual 来说已经很宽了
+  const double jump_gate = (std::abs(omega_est_) < 0.5) ? 1.5 : 0.8;
+
+  if (last_obs_phase_valid_ && std::abs(dphase_centered) < jump_gate) {
+    // 核心：累积值 = 预测增量 + 观测残差
+    unwrapped_phase_accum_ += (pred_dphase + dphase_centered);
   }
   last_obs_phase_ = obs_phase0;
   last_obs_time_ = t;
@@ -477,7 +488,12 @@ void OutpostTarget::predict(double dt)
 
   double v1 = 10;      // 位置加速度方差
   double vphi = 0.2;   // 相位随机游走强度（吸收 omega 估计误差）
-  double vr = 1e-6;    // 半径过程噪声（很小，能缓慢自适应但不会乱跳）
+
+  // [改进] 半径过程噪声：收敛后逐渐"硬化"（软固化）
+  // 前 20 帧允许自由收敛，之后极大幅度降低（防止呼吸）
+  // 但保留 1e-10 以适应机器人距离变化导致的微小 PnP 缩放误差
+  double vr = (update_count_ > 20) ? 1e-10 : 1e-6;
+
   auto a = dt * dt * dt * dt / 4;
   auto b = dt * dt * dt / 2;
   auto c = dt * dt;
