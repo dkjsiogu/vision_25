@@ -28,8 +28,9 @@ enum class OutpostState
  * - z (pitch) 用观测值实时追踪
  * - pitch 变化幅度小于阈值时才允许开火
  *
- * 状态向量 (7维):
- * [center_x, vx, center_y, vy, phase0, omega, radius]
+ * 状态向量:
+ * - EKF (6维): [center_x, vx, center_y, vy, phase0, radius]
+ * - omega 独立估计（不放入 EKF），用于预测 phase0
  */
 class OutpostTarget
 {

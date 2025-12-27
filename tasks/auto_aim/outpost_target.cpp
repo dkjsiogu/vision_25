@@ -168,10 +168,10 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
 
   meas_valid_ = basic_pass && rigorous_pass;
 
-  if (best_i != 0) {
-    jumped = true;
-    last_id = best_i;
-  }
+  // 对前哨站而言，我们始终能给出3块装甲板的预测位置，因此在 TRACKING 时允许 Aimer 进行多板选点。
+  // last_id 用于记录当前帧观测匹配到的装甲板编号（debug/可视化/下游选点参考）。
+  jumped = true;
+  last_id = best_i;
 }
 
 void OutpostTarget::update_omega_from_observation_xy(
@@ -226,7 +226,25 @@ void OutpostTarget::update_omega_from_observation_xy(
   // 0.8 rad ≈ 45度，对于 centred residual 来说已经很宽了
   const double jump_gate = (std::abs(omega_est_) < 0.5) ? 1.5 : 0.8;
 
-  if (last_obs_phase_valid_ && std::abs(dphase_centered) < jump_gate) {
+  // 如果 centred residual 过大，说明发生了切板误匹配/观测跳变。
+  // 这时不应该把“未更新的相位累积值”继续塞进回归窗口，否则回归会被大量水平点拉向 0。
+  if (last_obs_phase_valid_ && std::abs(dphase_centered) >= jump_gate) {
+    unwrapped_phase_history_.clear();
+    phase_time_history_.clear();
+    unwrapped_phase_accum_ = 0.0;
+    window_base_time_ = t;
+    window_base_time_valid_ = true;
+
+    last_obs_phase_ = obs_phase0;
+    last_obs_time_ = t;
+    last_obs_phase_valid_ = true;
+
+    unwrapped_phase_history_.push_back(unwrapped_phase_accum_);
+    phase_time_history_.push_back(0.0);
+    return;
+  }
+
+  if (last_obs_phase_valid_) {
     // 核心：累积值 = 预测增量 + 观测残差
     unwrapped_phase_accum_ += (pred_dphase + dphase_centered);
   }
