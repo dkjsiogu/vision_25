@@ -563,6 +563,18 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     init_ekf(armor);
     state_ = OutpostState::TRACKING;
     last_update_time_ = t;
+
+    // 初始化帧也提交调试记录，避免 recorder 时间轴错位
+    REC.set("omega", omega_est_);
+    REC.set("meas_valid", true);
+    REC.set("meas_plate_id", meas_plate_id_);
+    REC.set("z0", plate_z_[0]);
+    REC.set("z1", plate_z_[1]);
+    REC.set("z2", plate_z_[2]);
+    REC.set("z0_valid", plate_z_valid_[0] ? 1 : 0);
+    REC.set("z1_valid", plate_z_valid_[1] ? 1 : 0);
+    REC.set("z2_valid", plate_z_valid_[2] ? 1 : 0);
+    REC.commit();
     return true;
   }
 
@@ -602,6 +614,14 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
   // [日志] 所有数据收集完毕，提交本帧
   REC.set("omega", omega_est_);
+  REC.set("meas_plate_id", meas_plate_id_);
+  REC.set("meas_plate_id_for_update", meas_plate_id_for_update_);
+  REC.set("z0", plate_z_[0]);
+  REC.set("z1", plate_z_[1]);
+  REC.set("z2", plate_z_[2]);
+  REC.set("z0_valid", plate_z_valid_[0] ? 1 : 0);
+  REC.set("z1_valid", plate_z_valid_[1] ? 1 : 0);
+  REC.set("z2_valid", plate_z_valid_[2] ? 1 : 0);
   REC.commit();
 
   return true;
