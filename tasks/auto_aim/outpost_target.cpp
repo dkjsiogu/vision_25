@@ -134,6 +134,7 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
   int best_i = 0;
   double best_err2 = 1e100;
   double second_err2 = 1e100;
+  double err2_list[3] = {0, 0, 0};  // 记录三块板各自的残差
 
   for (int i = 0; i < 3; i++) {
     const double angle = tools::limit_rad(phase0_pred + i * 2.0 * M_PI / 3.0);
@@ -142,6 +143,7 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
     const double dx = obs_x - pred_x;
     const double dy = obs_y - pred_y;
     const double err2 = dx * dx + dy * dy;
+    err2_list[i] = err2;
     if (err2 < best_err2) {
       second_err2 = best_err2;
       best_err2 = err2;
@@ -185,6 +187,9 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
   REC.set("plate_id", best_i);
   REC.set("best_err", std::sqrt(best_err2));
   REC.set("second_err", std::sqrt(second_err2));
+  REC.set("err0", std::sqrt(err2_list[0]));
+  REC.set("err1", std::sqrt(err2_list[1]));
+  REC.set("err2", std::sqrt(err2_list[2]));
   REC.set("ratio", ratio);
   REC.set("basic_pass", basic_pass);
   REC.set("rigor_pass", rigorous_pass);
@@ -248,6 +253,7 @@ void OutpostTarget::update_omega_from_observation_xy(
   }
   last_pll_time_ = t;
   last_pll_time_valid_ = true;
+  REC.set("dt_pll", dt_pll);
 
   if (dt_pll > 0.0 && dt_pll < 0.12) {
     // 前几帧用较大的 Kp 快速点火，之后用较小的 Kp 平滑跟踪
@@ -270,10 +276,16 @@ void OutpostTarget::update_omega_from_observation_xy(
   // [改进] 动态门限：启动期宽容（omega 还没起来），稳定期严格
   // 0.8 rad ≈ 45度，对于 centred residual 来说已经很宽了
   const double jump_gate = (std::abs(omega_est_) < 0.5) ? 1.5 : 0.8;
+  const bool jump_triggered = last_obs_phase_valid_ && std::abs(dphase_centered) >= jump_gate;
+
+  // [日志] 记录滑窗回归相关数据
+  REC.set("dphase_centered", dphase_centered);
+  REC.set("jump_gate", jump_gate);
+  REC.set("jump_triggered", jump_triggered ? 1 : 0);
 
   // 如果 centred residual 过大，说明发生了切板误匹配/观测跳变。
-  // 这时不应该把“未更新的相位累积值”继续塞进回归窗口，否则回归会被大量水平点拉向 0。
-  if (last_obs_phase_valid_ && std::abs(dphase_centered) >= jump_gate) {
+  // 这时不应该把"未更新的相位累积值"继续塞进回归窗口，否则回归会被大量水平点拉向 0。
+  if (jump_triggered) {
     unwrapped_phase_history_.clear();
     phase_time_history_.clear();
     unwrapped_phase_accum_ = 0.0;
@@ -319,6 +331,7 @@ void OutpostTarget::update_omega_from_observation_xy(
 
   // 滑窗回归：拟合 omega = d(phase)/dt
   // 因为时间是相对值（0.0, 0.01, 0.02...），数值精度极高
+  REC.set("window_size", static_cast<int>(unwrapped_phase_history_.size()));
   if (unwrapped_phase_history_.size() >= 5) {
     double t_mean = 0, phi_mean = 0;
     const size_t n = unwrapped_phase_history_.size();
@@ -342,6 +355,8 @@ void OutpostTarget::update_omega_from_observation_xy(
       // 融合 PLL 和回归结果：回归更稳定，权重逐渐增大
       const double regress_weight = std::min(1.0, update_count_ / 15.0);
       omega_est_ = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_regress;
+      REC.set("omega_regress", omega_regress);
+      REC.set("regress_weight", regress_weight);
     }
   }
 
@@ -544,6 +559,7 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
   priority = armor.priority;
 
   // [日志] 记录观测原始数据
+  REC.set("state", state_ == OutpostState::TRACKING ? 1 : 0);
   REC.set("obs_x", armor.xyz_in_world[0]);
   REC.set("obs_y", armor.xyz_in_world[1]);
   REC.set("obs_z", armor.xyz_in_world[2]);
@@ -565,6 +581,8 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     last_update_time_ = t;
 
     // 初始化帧也提交调试记录，避免 recorder 时间轴错位
+    REC.set("state", 1);  // 刚进入 TRACKING
+    REC.set("dt", 0.0);   // 初始化帧没有 dt
     REC.set("omega", omega_est_);
     REC.set("meas_valid", true);
     REC.set("meas_plate_id", meas_plate_id_);
@@ -580,6 +598,7 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
   // 先 predict 到当前时刻
   double dt = tools::delta_time(t, last_update_time_);
+  REC.set("dt", dt);
   if (dt > 0 && dt < 0.1) {
     predict(dt);
   }
