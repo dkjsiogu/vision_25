@@ -5,8 +5,12 @@
 #include <algorithm>
 #include <cmath>
 
+#include "tools/debug_recorder.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+
+// 获取前哨站专用的调试记录器
+#define REC tools::DebugRecorder::instance("outpost")
 
 namespace auto_aim
 {
@@ -168,6 +172,32 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
 
   meas_valid_ = basic_pass && rigorous_pass;
 
+  // [日志] 记录门控信息
+  REC.set("plate_id", best_i);
+  REC.set("best_err", std::sqrt(best_err2));
+  REC.set("second_err", std::sqrt(second_err2));
+  REC.set("ratio", ratio);
+  REC.set("basic_pass", basic_pass);
+  REC.set("rigor_pass", rigorous_pass);
+  REC.set("meas_valid", meas_valid_);
+
+  // 计算最优装甲板的预测位置
+  const double best_angle = tools::limit_rad(phase0_pred + best_i * 2.0 * M_PI / 3.0);
+  const double pred_x = cx - r * std::cos(best_angle);
+  const double pred_y = cy - r * std::sin(best_angle);
+  REC.set("pred_x", pred_x);
+  REC.set("pred_y", pred_y);
+  REC.set("res_x", obs_x - pred_x);
+  REC.set("res_y", obs_y - pred_y);
+
+  // [诊断日志] 门控决策细节
+  if (!meas_valid_) {
+    tools::logger()->debug(
+      "[Outpost] REJECT: best_err={:.3f} gate={:.3f} ratio={:.2f} basic={} rigor={}",
+      std::sqrt(best_err2), xy_residual_gate_m_, ratio,
+      basic_pass ? 1 : 0, rigorous_pass ? 1 : 0);
+  }
+
   // 对前哨站而言，我们始终能给出3块装甲板的预测位置，因此在 TRACKING 时允许 Aimer 进行多板选点。
   // last_id 用于记录当前帧观测匹配到的装甲板编号（debug/可视化/下游选点参考）。
   jumped = true;
@@ -192,9 +222,13 @@ void OutpostTarget::update_omega_from_observation_xy(
   const double obs_phase0 = tools::limit_rad(obs_phase_plate - meas_plate_id_ * 2.0 * M_PI / 3.0);
 
   // ========== PLL 部分：用相位误差修正 omega ==========
-  // 使用“predict后、update前”的相位作为预测值，避免 update_ekf() 已经吃入观测导致误差被人为变小。
+  // 使用"predict后、update前"的相位作为预测值，避免 update_ekf() 已经吃入观测导致误差被人为变小。
   const double pred_phase0 = phase0_pred_before_update_;
   const double phase_err = tools::limit_rad(obs_phase0 - pred_phase0);
+
+  // [日志] 记录 PLL 相关数据
+  REC.set("obs_phase0", obs_phase0);
+  REC.set("phase_err", phase_err);
 
   // dt 无关：把 pll_Kp_ 视为 omega_dot 的增益（1/s^2 量纲），离散实现 omega += Kp * err * dt
   double dt_pll = 0.0;
@@ -365,9 +399,9 @@ void OutpostTarget::init_ekf(const Armor & armor)
 
 void OutpostTarget::update_ekf(const Armor & armor)
 {
-  if (!meas_valid_) {
-    return;
-  }
+  // 门控失败时：不完全跳过，而是用超大噪声做"软锚定"
+  // 这样中心不会飞走，但也不会被错误观测带偏
+  const double rejection_sigma = 0.5;  // 门控失败时的大噪声 (m)
 
   // 观测量：直接用世界系装甲板 (x,y)
   // 这样 phase/omega 由位置序列驱动，不依赖 PnP 的装甲板朝向 yaw（该量在前哨站场景下很可能不稳定/近似常量）。
@@ -394,11 +428,17 @@ void OutpostTarget::update_ekf(const Armor & armor)
   H(1, 5) = -std::sin(angle);
 
   // 观测噪声：用距离粗略缩放。pitch 不稳定时整体加大 (x,y) 噪声，避免高度抖动导致的解算漂移拖拽中心/相位。
-  const double dist = std::max(0.0, armor.ypd_in_world[2]);
-  double sigma_xy = sigma_xy_base_ + sigma_xy_k_ * dist;
-  sigma_xy = std::clamp(sigma_xy, sigma_xy_min_, sigma_xy_max_);
-  if (!pitch_stable()) {
-    sigma_xy *= std::sqrt(pitch_unstable_r_scale_);
+  double sigma_xy;
+  if (!meas_valid_) {
+    // 门控失败：用超大噪声做软锚定，防止中心飞走
+    sigma_xy = rejection_sigma;
+  } else {
+    const double dist = std::max(0.0, armor.ypd_in_world[2]);
+    sigma_xy = sigma_xy_base_ + sigma_xy_k_ * dist;
+    sigma_xy = std::clamp(sigma_xy, sigma_xy_min_, sigma_xy_max_);
+    if (!pitch_stable()) {
+      sigma_xy *= std::sqrt(pitch_unstable_r_scale_);
+    }
   }
   Eigen::VectorXd R_dig(2);
   R_dig << sigma_xy * sigma_xy, sigma_xy * sigma_xy;
@@ -418,7 +458,37 @@ void OutpostTarget::update_ekf(const Armor & armor)
   };
 
   ekf_.update(z_obs, H, R, h_func, z_subtract);
-  update_count_++;
+
+  // [保险] rejection 帧直接压掉速度，避免中心被速度项持续带跑。
+  // 前哨站中心理论上静止；vx/vy 大多来自误更新/误匹配/高度抖动期间的 PnP 噪声。
+  if (!meas_valid_) {
+    ekf_.x[1] = 0.0;
+    ekf_.x[3] = 0.0;
+  }
+
+  // [日志] 记录 EKF 状态
+  REC.set("sigma_xy", sigma_xy);
+  REC.set("cx", ekf_.x[0]);
+  REC.set("vx", ekf_.x[1]);
+  REC.set("cy", ekf_.x[2]);
+  REC.set("vy", ekf_.x[3]);
+  REC.set("phase0", ekf_.x[4]);
+  REC.set("radius", ekf_.x[5]);
+  REC.set("pitch_var", pitch_variation_);
+  REC.set("pitch_stable", pitch_stable());
+  REC.set("obs_z", observed_z_);
+  REC.set("update_cnt", update_count_);
+
+  // [诊断日志] 每帧打印关键状态，便于定位"中心飞走"原因
+  tools::logger()->debug(
+    "[Outpost] valid={} σ={:.3f} cx={:.2f} cy={:.2f} vx={:.3f} vy={:.3f} r={:.3f} ω={:.2f}",
+    meas_valid_ ? 1 : 0, sigma_xy,
+    ekf_.x[0], ekf_.x[2], ekf_.x[1], ekf_.x[3], ekf_.x[5], omega_est_);
+
+  // 只有门控通过的帧才计入有效更新次数
+  if (meas_valid_) {
+    update_count_++;
+  }
 }
 
 void OutpostTarget::update_pitch_tracking(double pitch)
@@ -449,6 +519,14 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
   temp_lost_count_ = 0;
   priority = armor.priority;
+
+  // [日志] 记录观测原始数据
+  REC.set("obs_x", armor.xyz_in_world[0]);
+  REC.set("obs_y", armor.xyz_in_world[1]);
+  REC.set("obs_z", armor.xyz_in_world[2]);
+  REC.set("obs_yaw", armor.ypr_in_world[0]);
+  REC.set("obs_pitch", armor.ypd_in_world[1]);
+  REC.set("obs_dist", armor.ypd_in_world[2]);
 
   // 更新 pitch 追踪（用于判断是否处于高度切换/抖动期）
   update_pitch_tracking(armor.ypd_in_world[1]);
@@ -489,6 +567,10 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
   // 用几何相位差分辅助 omega 估计（带跳变门控）
   update_omega_from_observation_xy(armor, t);
+
+  // [日志] 所有数据收集完毕，提交本帧
+  REC.set("omega", omega_est_);
+  REC.commit();
 
   return true;
 }
@@ -558,6 +640,14 @@ void OutpostTarget::predict(double dt)
 
   auto f = [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
     Eigen::VectorXd x_prior = F * x;
+
+    // [安全] 速度阻尼：前哨站中心理论上静止，限制速度防止飞走
+    // 丢帧时速度会累积，这里加阻尼防止失控
+    const double vel_decay = 0.95;  // 每帧衰减 5%
+    const double max_vel = 0.3;     // 最大速度 0.3 m/s
+    x_prior[1] = std::clamp(x_prior[1] * vel_decay, -max_vel, max_vel);
+    x_prior[3] = std::clamp(x_prior[3] * vel_decay, -max_vel, max_vel);
+
     // phase0 由 omega_est_ 外推
     x_prior[4] = tools::limit_rad(x_prior[4] + omega_est_ * dt);
     return x_prior;
