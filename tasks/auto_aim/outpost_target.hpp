@@ -2,6 +2,7 @@
 #define AUTO_AIM__OUTPOST_TARGET_HPP
 
 #include <Eigen/Dense>
+#include <array>
 #include <chrono>
 #include <deque>
 #include <string>
@@ -54,7 +55,7 @@ public:
   void predict(std::chrono::steady_clock::time_point t);
   void predict(double dt);
 
-  // 获取三个装甲板的 [x, y, z, angle]，z 全部用 observed_z_
+  // 获取三个装甲板的 [x, y, z, angle]
   std::vector<Eigen::Vector4d> armor_xyza_list() const;
 
   // 转换为 11 维状态（兼容 Target 接口）
@@ -102,7 +103,13 @@ private:
   bool window_base_time_valid_ = false;
   static constexpr size_t OMEGA_WINDOW_SIZE = 10;
 
-  // 观测 z 值（实时更新，滑动平均）
+  // z 估计：单目无法可靠判定“上中下层”，但在 TRACKING 状态下我们能稳定地给出
+  // 三块装甲板的角度 id（0/1/2）。因此对每个 id 维护一条 z 估计，并且只在
+  // meas_valid_==true 时更新对应 id，避免三层 z 互相污染。
+  std::array<double, 3> plate_z_{{0.0, 0.0, 0.0}};
+  std::array<bool, 3> plate_z_valid_{{false, false, false}};
+
+  // 当前用于下游（瞄准/弹道）的一块装甲板 z（通常等于 plate_z_[meas_plate_id_]）
   double observed_z_ = 0.0;
   bool observed_z_valid_ = false;
 

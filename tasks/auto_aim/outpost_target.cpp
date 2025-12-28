@@ -94,6 +94,8 @@ void OutpostTarget::reset()
   jumped = false;
   last_id = 0;
 
+  plate_z_ = {0.0, 0.0, 0.0};
+  plate_z_valid_ = {false, false, false};
   observed_z_ = 0.0;
   observed_z_valid_ = false;
 
@@ -383,6 +385,8 @@ void OutpostTarget::init_ekf(const Armor & armor)
   ekf_initialized_ = true;
 
   // 初始化观测 z
+  plate_z_ = {armor_z, armor_z, armor_z};
+  plate_z_valid_ = {true, true, true};
   observed_z_ = armor_z;
   observed_z_valid_ = true;
 
@@ -550,15 +554,10 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
   // 更新 pitch 追踪（用于判断是否处于高度切换/抖动期）
   update_pitch_tracking(armor.ypd_in_world[1]);
 
-  // 更新观测 z（滑动平均）：稳定期快速跟随；不稳定期保守更新，避免多高度混入振荡。
+  // 注意：单目 PnP 的 z 对“上中下层”存在歧义。
+  // 这里不再用一个 observed_z_ 对所有观测做滑动平均（会把三层混在一起）。
+  // 而是在对齐/选板之后，仅在 meas_valid_==true 时更新对应 plate_id 的 z。
   const double obs_z = armor.xyz_in_world[2];
-  if (!observed_z_valid_) {
-    observed_z_ = obs_z;
-    observed_z_valid_ = true;
-  } else {
-    const double alpha = pitch_stable() ? observed_z_alpha_stable_ : observed_z_alpha_unstable_;
-    observed_z_ = observed_z_ * (1.0 - alpha) + obs_z * alpha;
-  }
 
   if (state_ == OutpostState::LOST) {
     init_ekf(armor);
@@ -576,6 +575,20 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
   // 观测可能来自不同装甲板：更新前基于 (x,y) 残差对齐 phase0，保持残差连续
   align_phase_to_observation_xy(armor);
+
+  // 更新 z：只更新“可信观测”的那一块板，避免三层互相污染。
+  if (meas_valid_) {
+    const int zid = meas_plate_id_;
+    const double alpha = pitch_stable() ? observed_z_alpha_stable_ : observed_z_alpha_unstable_;
+    if (!plate_z_valid_[zid]) {
+      plate_z_[zid] = obs_z;
+      plate_z_valid_[zid] = true;
+    } else {
+      plate_z_[zid] = plate_z_[zid] * (1.0 - alpha) + obs_z * alpha;
+    }
+    observed_z_ = plate_z_[zid];
+    observed_z_valid_ = true;
+  }
 
   // 缓存本帧 update 前的预测相位，供 PLL 使用
   phase0_pred_before_update_ = ekf_.x[4];
@@ -687,7 +700,10 @@ Eigen::Vector4d OutpostTarget::armor_xyza(int i) const
 
   double armor_x = cx - r * std::cos(angle);
   double armor_y = cy - r * std::sin(angle);
-  double armor_z = observed_z_;  // 所有装甲板用同一个观测 z
+  double armor_z = observed_z_;
+  if (i >= 0 && i < 3 && plate_z_valid_[i]) {
+    armor_z = plate_z_[i];
+  }
 
   return {armor_x, armor_y, armor_z, angle};
 }
