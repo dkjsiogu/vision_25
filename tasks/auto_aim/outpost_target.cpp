@@ -363,11 +363,14 @@ void OutpostTarget::init_ekf(const Armor & armor)
   Eigen::VectorXd x0(5);
   x0 << cx, 0, cy, 0, armor_yaw;
 
-  // P0 参数
-  // [修复] 速度不确定性从 64 降为 0.1，避免初始帧速度估计爆炸
-  // 前哨站中心理论上静止，初始时不应相信它在高速移动
+  // ============ P0 设计哲学 ============
+  // 前哨站中心静止，所有参数都应体现这个强先验：
+  // - 位置：第一帧 PnP 的 armor_yaw 可能有误差，初始中心估计可能偏 5-10cm
+  //         所以位置不确定性设为 0.25（σ=0.5m），允许 EKF 慢慢修正
+  // - 速度：我们 *知道* 速度应该是 0，不确定性设为极小值 0.01（σ=0.1m/s）
+  //         这样 EKF 不会轻易相信中心在移动
   Eigen::VectorXd P0_dig(5);
-  P0_dig << 1, 0.1, 1, 0.1, 0.4;
+  P0_dig << 0.25, 0.01, 0.25, 0.01, 0.4;
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
   auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
@@ -470,8 +473,13 @@ void OutpostTarget::update_ekf(const Armor & armor)
 
   ekf_.update(z_obs, H, R, h_func, z_subtract);
 
-  // [保险] rejection 帧直接压掉速度，避免中心被速度项持续带跑。
-  // 前哨站中心理论上静止；vx/vy 大多来自误更新/误匹配/高度抖动期间的 PnP 噪声。
+  // ============ Update 后速度约束 ============
+  // EKF update 可能注入速度，必须立即约束，与 predict 中的约束保持一致
+  const double max_vel = 0.05;  // 与 predict 中一致：5cm/s
+  ekf_.x[1] = std::clamp(ekf_.x[1], -max_vel, max_vel);
+  ekf_.x[3] = std::clamp(ekf_.x[3], -max_vel, max_vel);
+
+  // rejection 帧直接归零：完全不相信这帧的速度信息
   if (!meas_valid_) {
     ekf_.x[1] = 0.0;
     ekf_.x[3] = 0.0;
@@ -625,8 +633,12 @@ void OutpostTarget::predict(double dt)
   };
   // clang-format on
 
-  double v1 = 10;      // 位置加速度方差
-  double vphi = 0.2;   // 相位随机游走强度（吸收 omega 估计误差）
+  // ============ Q 设计哲学 ============
+  // 前哨站中心静止：
+  // - v1（位置加速度方差）：极小，中心几乎不动
+  // - vphi（相位噪声）：允许 omega 估计有些误差
+  double v1 = 0.01;      // 加速度 σ ≈ 0.1 m/s²（原 10，太大导致中心漂移）
+  double vphi = 0.2;     // 相位随机游走强度
 
   auto a = dt * dt * dt * dt / 4;
   auto b = dt * dt * dt / 2;
@@ -645,10 +657,12 @@ void OutpostTarget::predict(double dt)
   auto f = [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
     Eigen::VectorXd x_prior = F * x;
 
-    // [安全] 速度阻尼：前哨站中心理论上静止，限制速度防止飞走
-    // 丢帧时速度会累积，这里加阻尼防止失控
-    const double vel_decay = 0.95;  // 每帧衰减 5%
-    const double max_vel = 0.3;     // 最大速度 0.3 m/s
+    // ============ 速度约束哲学 ============
+    // 前哨站中心静止，速度只是为了平滑单帧观测噪声，不应累积：
+    // - 激进阻尼：每帧衰减 50%，速度快速归零
+    // - 严格限幅：最大 5cm/s，中心几乎不动
+    const double vel_decay = 0.5;   // 每帧衰减 50%（原 5%，太慢导致速度累积）
+    const double max_vel = 0.05;    // 最大 5cm/s（原 30cm/s，太大）
     x_prior[1] = std::clamp(x_prior[1] * vel_decay, -max_vel, max_vel);
     x_prior[3] = std::clamp(x_prior[3] * vel_decay, -max_vel, max_vel);
 
