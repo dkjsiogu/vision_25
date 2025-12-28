@@ -120,16 +120,18 @@ private:
   double observed_z_alpha_unstable_ = 0.2;
 
   // (x,y) 观测噪声参数：sigma_xy = clamp(base + k * dist, min, max)
-  double sigma_xy_base_ = 0.015;
-  double sigma_xy_k_ = 0.0015;
-  double sigma_xy_min_ = 0.006;
-  double sigma_xy_max_ = 0.06;
+  // [修复] 增大噪声，更现实地反映 PnP 误差（原值太乐观导致过度信任观测）
+  double sigma_xy_base_ = 0.05;   // 5cm 基础噪声（原 1.5cm）
+  double sigma_xy_k_ = 0.01;      // 每米增加 1cm（原 0.15cm）
+  double sigma_xy_min_ = 0.03;    // 最小 3cm（原 0.6cm）
+  double sigma_xy_max_ = 0.15;    // 最大 15cm（原 6cm）
 
   // (x,y) 残差门控：
   // - 绝对门控：最小残差若仍然过大，则本帧跳过 EKF 更新/omega 更新
   // - 比值门控：最小残差必须显著优于第二名，避免中心漂移时三个都大但仍选出一个
-  double xy_residual_gate_m_ = 0.18;
-  double xy_residual_ratio_gate_ = 0.7;  // e1/e2 < ratio 才接受
+  // [修复] 放宽门控，原值太严导致 66% 拒绝率
+  double xy_residual_gate_m_ = 0.25;          // 25cm（原 18cm）
+  double xy_residual_ratio_gate_ = 0.8;       // 比值门控放宽（原 0.7）
 
   std::chrono::steady_clock::time_point last_update_time_;
 

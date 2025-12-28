@@ -355,8 +355,10 @@ void OutpostTarget::init_ekf(const Armor & armor)
   x0 << cx, 0, cy, 0, armor_yaw;
 
   // P0 参数
+  // [修复] 速度不确定性从 64 降为 0.1，避免初始帧速度估计爆炸
+  // 前哨站中心理论上静止，初始时不应相信它在高速移动
   Eigen::VectorXd P0_dig(5);
-  P0_dig << 1, 64, 1, 64, 0.4;
+  P0_dig << 1, 0.1, 1, 0.1, 0.4;
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
   auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
