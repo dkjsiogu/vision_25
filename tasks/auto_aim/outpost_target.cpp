@@ -120,7 +120,7 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
 
   const double cx = ekf_.x[0], cy = ekf_.x[2];
   const double phase0_pred = ekf_.x[4];
-  const double r = ekf_.x[5];
+  const double r = outpost_radius_;  // 常量半径
 
   const double obs_x = armor.xyz_in_world[0];
   const double obs_y = armor.xyz_in_world[1];
@@ -349,13 +349,14 @@ void OutpostTarget::init_ekf(const Armor & armor)
   double cx = armor_x + outpost_radius_ * std::cos(armor_yaw);
   double cy = armor_y + outpost_radius_ * std::sin(armor_yaw);
 
-  // 状态: [cx, vx, cy, vy, phase0, radius] (6维)
-  Eigen::VectorXd x0(6);
-  x0 << cx, 0, cy, 0, armor_yaw, outpost_radius_;
+  // 状态: [cx, vx, cy, vy, phase0] (5维)
+  // radius 为常量，不放入 EKF
+  Eigen::VectorXd x0(5);
+  x0 << cx, 0, cy, 0, armor_yaw;
 
   // P0 参数
-  Eigen::VectorXd P0_dig(6);
-  P0_dig << 1, 64, 1, 64, 0.4, 0.01;  // radius 初始不确定性小
+  Eigen::VectorXd P0_dig(5);
+  P0_dig << 1, 64, 1, 64, 0.4;
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
   auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
@@ -408,24 +409,22 @@ void OutpostTarget::update_ekf(const Armor & armor)
   Eigen::VectorXd z_obs(2);
   z_obs << armor.xyz_in_world[0], armor.xyz_in_world[1];
 
-  // 状态: [cx, vx, cy, vy, phase0, radius]
+  // 状态: [cx, vx, cy, vy, phase0] (5维)
   // 当前帧观测对应的装甲板角度：phase0 + meas_plate_id*120deg
   const double phase0 = ekf_.x[4];
-  const double r = ekf_.x[5];
+  const double r = outpost_radius_;  // 常量半径
   const double angle = tools::limit_rad(phase0 + meas_plate_id_ * 2.0 * M_PI / 3.0);
 
-  // 观测雅可比 (2x6)
+  // 观测雅可比 (2x5)
   // ax = cx - r cos(angle)
   // ay = cy - r sin(angle)
-  // d(ax)/d(cx) = 1, d(ax)/d(phase0) = r*sin(angle), d(ax)/d(r) = -cos(angle)
-  // d(ay)/d(cy) = 1, d(ay)/d(phase0) = -r*cos(angle), d(ay)/d(r) = -sin(angle)
-  Eigen::MatrixXd H = Eigen::MatrixXd::Zero(2, 6);
+  // d(ax)/d(cx) = 1, d(ax)/d(phase0) = r*sin(angle)
+  // d(ay)/d(cy) = 1, d(ay)/d(phase0) = -r*cos(angle)
+  Eigen::MatrixXd H = Eigen::MatrixXd::Zero(2, 5);
   H(0, 0) = 1.0;
   H(0, 4) = r * std::sin(angle);
-  H(0, 5) = -std::cos(angle);
   H(1, 2) = 1.0;
   H(1, 4) = -r * std::cos(angle);
-  H(1, 5) = -std::sin(angle);
 
   // 观测噪声：用距离粗略缩放。pitch 不稳定时整体加大 (x,y) 噪声，避免高度抖动导致的解算漂移拖拽中心/相位。
   double sigma_xy;
@@ -450,10 +449,10 @@ void OutpostTarget::update_ekf(const Armor & armor)
 
   auto h_func = [&](const Eigen::VectorXd & x) -> Eigen::Vector2d {
     const double cx_ = x[0], cy_ = x[2];
-    const double phase0_ = x[4], r_ = x[5];
+    const double phase0_ = x[4];
     const double angle_ = tools::limit_rad(phase0_ + meas_plate_id_ * 2.0 * M_PI / 3.0);
-    const double ax = cx_ - r_ * std::cos(angle_);
-    const double ay = cy_ - r_ * std::sin(angle_);
+    const double ax = cx_ - r * std::cos(angle_);
+    const double ay = cy_ - r * std::sin(angle_);
     return {ax, ay};
   };
 
@@ -473,7 +472,7 @@ void OutpostTarget::update_ekf(const Armor & armor)
   REC.set("cy", ekf_.x[2]);
   REC.set("vy", ekf_.x[3]);
   REC.set("phase0", ekf_.x[4]);
-  REC.set("radius", ekf_.x[5]);
+  REC.set("radius", outpost_radius_);  // 常量
   REC.set("pitch_var", pitch_variation_);
   REC.set("pitch_stable", pitch_stable());
   REC.set("obs_z", observed_z_);
@@ -483,7 +482,7 @@ void OutpostTarget::update_ekf(const Armor & armor)
   tools::logger()->debug(
     "[Outpost] valid={} σ={:.3f} cx={:.2f} cy={:.2f} vx={:.3f} vy={:.3f} r={:.3f} ω={:.2f}",
     meas_valid_ ? 1 : 0, sigma_xy,
-    ekf_.x[0], ekf_.x[2], ekf_.x[1], ekf_.x[3], ekf_.x[5], omega_est_);
+    ekf_.x[0], ekf_.x[2], ekf_.x[1], ekf_.x[3], outpost_radius_, omega_est_);
 
   // 只有门控通过的帧才计入有效更新次数
   if (meas_valid_) {
@@ -603,25 +602,19 @@ void OutpostTarget::predict(double dt)
 {
   if (!ekf_initialized_ || dt <= 0) return;
 
-  // 状态转移矩阵: [cx, vx, cy, vy, phase0, radius]
+  // 状态转移矩阵: [cx, vx, cy, vy, phase0] (5维)
   // clang-format off
   Eigen::MatrixXd F{
-    {1, dt,  0,  0,  0, 0},
-    {0,  1,  0,  0,  0, 0},
-    {0,  0,  1, dt,  0, 0},
-    {0,  0,  0,  1,  0, 0},
-    {0,  0,  0,  0,  1, 0},
-    {0,  0,  0,  0,  0, 1}
+    {1, dt,  0,  0,  0},
+    {0,  1,  0,  0,  0},
+    {0,  0,  1, dt,  0},
+    {0,  0,  0,  1,  0},
+    {0,  0,  0,  0,  1}
   };
   // clang-format on
 
   double v1 = 10;      // 位置加速度方差
   double vphi = 0.2;   // 相位随机游走强度（吸收 omega 估计误差）
-
-  // [改进] 半径过程噪声：收敛后逐渐"硬化"（软固化）
-  // 前 20 帧允许自由收敛，之后极大幅度降低（防止呼吸）
-  // 但保留 1e-10 以适应机器人距离变化导致的微小 PnP 缩放误差
-  double vr = (update_count_ > 20) ? 1e-10 : 1e-6;
 
   auto a = dt * dt * dt * dt / 4;
   auto b = dt * dt * dt / 2;
@@ -629,12 +622,11 @@ void OutpostTarget::predict(double dt)
 
   // clang-format off
   Eigen::MatrixXd Q{
-    {a * v1, b * v1,      0,      0,        0,    0},
-    {b * v1, c * v1,      0,      0,        0,    0},
-    {     0,      0, a * v1, b * v1,        0,    0},
-    {     0,      0, b * v1, c * v1,        0,    0},
-    {     0,      0,      0,      0, c * vphi,    0},
-    {     0,      0,      0,      0,        0, c * vr}
+    {a * v1, b * v1,      0,      0,        0},
+    {b * v1, c * v1,      0,      0,        0},
+    {     0,      0, a * v1, b * v1,        0},
+    {     0,      0, b * v1, c * v1,        0},
+    {     0,      0,      0,      0, c * vphi}
   };
   // clang-format on
 
@@ -662,7 +654,7 @@ Eigen::Vector4d OutpostTarget::armor_xyza(int i) const
 
   double cx = ekf_.x[0], cy = ekf_.x[2];
   double phase0 = ekf_.x[4];
-  double r = ekf_.x[5];
+  double r = outpost_radius_;  // 常量半径
 
   // 第 i 个装甲板的角度
   double angle = tools::limit_rad(phase0 + i * 2 * M_PI / 3);
@@ -699,11 +691,11 @@ Eigen::VectorXd OutpostTarget::ekf_x() const
     return x;
   }
 
-  // 6维状态: [cx, vx, cy, vy, phase0, radius]
+  // 5维状态: [cx, vx, cy, vy, phase0]
   // 转换为11维: [cx, vx, cy, vy, z, vz, phase, omega, radius, l, h]
   x << ekf_.x[0], ekf_.x[1], ekf_.x[2], ekf_.x[3],
     observed_z_, 0,  // z 用观测值，vz = 0
-    ekf_.x[4], omega_est_, ekf_.x[5], 0, 0;
+    ekf_.x[4], omega_est_, outpost_radius_, 0, 0;
   return x;
 }
 
@@ -711,9 +703,7 @@ bool OutpostTarget::diverged() const
 {
   if (!ekf_initialized_) return false;
 
-  // 检查半径是否发散
-  double r = ekf_.x[5];
-  if (r < 0.15 || r > 0.4) return true;
+  // radius 现在是常量，不再需要检查
 
   // 检查 omega 是否发散
   double omega = std::abs(omega_est_);

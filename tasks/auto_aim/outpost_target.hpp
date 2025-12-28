@@ -29,7 +29,8 @@ enum class OutpostState
  * - pitch 变化幅度小于阈值时才允许开火
  *
  * 状态向量:
- * - EKF (6维): [center_x, vx, center_y, vy, phase0, radius]
+ * - EKF (5维): [center_x, vx, center_y, vy, phase0]
+ * - radius 为常量（不放入 EKF，避免被观测噪声拉偏）
  * - omega 独立估计（不放入 EKF），用于预测 phase0
  */
 class OutpostTarget
@@ -73,8 +74,8 @@ public:
 private:
   OutpostState state_ = OutpostState::LOST;
 
-  // EKF: [cx, vx, cy, vy, phase0, radius] (6维)
-  // radius 用很小的过程噪声，能缓慢自适应但不会乱跳
+  // EKF: [cx, vx, cy, vy, phase0] (5维)
+  // radius 为常量，不放入 EKF（避免被观测噪声拉偏）
   tools::ExtendedKalmanFilter ekf_;
   bool ekf_initialized_ = false;
   int update_count_ = 0;
