@@ -99,6 +99,16 @@ Target::Target(
   };
 
   ekf_ = tools::ExtendedKalmanFilter(ekf_x, P0, x_add);
+
+  // 从 armor_list 提取各板的 z 值（用于前哨站三层高度独立处理）
+  if (name == ArmorName::outpost && armor_list.size() == 3) {
+    for (size_t i = 0; i < 3; i++) {
+      plate_z_[i] = armor_list[i][2];  // [x, y, z, angle] 中的 z
+    }
+    plate_z_valid_ = true;
+    observed_z_ = ekf_x[4];  // 同时设置 observed_z_ 作为默认值
+    observed_z_valid_ = true;
+  }
 }
 
 void Target::predict(std::chrono::steady_clock::time_point t)
@@ -334,10 +344,14 @@ Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
   auto armor_x = x[0] - r * std::cos(angle);
   auto armor_y = x[2] - r * std::sin(angle);
 
-  // 前哨站特殊处理：使用观测到的 z 值，而不是 EKF 估计的 z
+  // 高度处理：
+  // - 前哨站：使用各板独立的 z（plate_z_[id]）
+  // - 其他目标：使用 EKF 估计的 z
   double armor_z;
-  if (name == ArmorName::outpost && observed_z_valid_) {
-    armor_z = observed_z_;
+  if (name == ArmorName::outpost && plate_z_valid_ && id >= 0 && id < 3) {
+    armor_z = plate_z_[id];  // 使用该板独立的 z
+  } else if (name == ArmorName::outpost && observed_z_valid_) {
+    armor_z = observed_z_;   // 回退到单一 z
   } else {
     armor_z = (use_l_h) ? x[4] + x[10] : x[4];
   }

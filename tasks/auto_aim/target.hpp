@@ -2,6 +2,7 @@
 #define AUTO_AIM__TARGET_HPP
 
 #include <Eigen/Dense>
+#include <array>
 #include <chrono>
 #include <optional>
 #include <queue>
@@ -67,6 +68,10 @@ private:
   std::vector<int> initialized_ids_;    // 已初始化的装甲板ID列表
   std::vector<Eigen::Vector4d> external_armor_list_;  // 外部提供的装甲板列表
   bool use_external_armor_list_ = false;
+
+  // 前哨站三层高度独立存储（从 OutpostTarget 传入）
+  std::array<double, 3> plate_z_{{0.0, 0.0, 0.0}};
+  bool plate_z_valid_ = false;
 
   double observed_z_ = 0.0;       // 前哨站：最近观测到的 z 值
   bool observed_z_valid_ = false; // 观测 z 是否有效

@@ -411,9 +411,12 @@ void OutpostTarget::init_ekf(const Armor & armor)
   ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);
   ekf_initialized_ = true;
 
-  // 初始化观测 z
-  plate_z_ = {armor_z, armor_z, armor_z};
-  plate_z_valid_ = {true, true, true};
+  // 初始化观测 z：只初始化第一帧看到的那一块板
+  // 其他两块板等实际观测到时再初始化，避免三层 z 污染
+  plate_z_ = {0.0, 0.0, 0.0};
+  plate_z_valid_ = {false, false, false};
+  plate_z_[0] = armor_z;       // 第一帧默认是 plate 0
+  plate_z_valid_[0] = true;
   observed_z_ = armor_z;
   observed_z_valid_ = true;
 
@@ -746,9 +749,18 @@ Eigen::Vector4d OutpostTarget::armor_xyza(int i) const
 
   double armor_x = cx - r * std::cos(angle);
   double armor_y = cy - r * std::sin(angle);
-  double armor_z = observed_z_;
+
+  // 高度处理：
+  // - 如果该板已初始化，使用其独立估计的 z
+  // - 如果未初始化，用 observed_z_ + 层高偏移估计（前哨站层高差约 0.1m）
+  double armor_z;
   if (i >= 0 && i < 3 && plate_z_valid_[i]) {
     armor_z = plate_z_[i];
+  } else {
+    // 未初始化的板：根据板号给一个预估偏移，让三层视觉上分开
+    // 这是粗略估计，实际高度需要观测到该板后才能确定
+    const double layer_offset = 0.1;  // 前哨站层高差约 0.1m
+    armor_z = observed_z_ + (i - 1) * layer_offset;  // i=0: -0.1, i=1: 0, i=2: +0.1
   }
 
   return {armor_x, armor_y, armor_z, angle};
