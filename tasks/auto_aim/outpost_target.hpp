@@ -147,6 +147,10 @@ private:
   // - 基于 (x,y) 残差选择/对齐当前观测对应的装甲板（避免 120° 切板跳变导致相位不连续）
   // - 用中心->装甲板向量推回观测相位，辅助估计 omega
   int meas_plate_id_ = 0;
+  // 本帧用于 EKF update 的候选装甲板编号（始终取残差最小者）。
+  // 注意：当 meas_valid_==false 时，我们不会把该编号传播给下游（last_id/meas_plate_id_），
+  // 但 EKF 的观测模型仍使用该候选编号以尽可能匹配当前观测。
+  int meas_plate_id_for_update_ = 0;
   bool meas_valid_ = true;
   double last_obs_phase_ = 0.0;
   std::chrono::steady_clock::time_point last_obs_time_;

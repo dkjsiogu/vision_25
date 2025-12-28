@@ -110,6 +110,7 @@ void OutpostTarget::reset()
   last_pll_time_valid_ = false;
 
   meas_plate_id_ = 0;
+  meas_plate_id_for_update_ = 0;
   meas_valid_ = true;
   last_obs_phase_valid_ = false;
 }
@@ -148,7 +149,8 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
     }
   }
 
-  meas_plate_id_ = best_i;
+  // 始终记录本帧用于 EKF update 的候选板号（残差最小者）
+  meas_plate_id_for_update_ = best_i;
 
   // [改进] 智能门控策略：
   const double abs_gate_sq = xy_residual_gate_m_ * xy_residual_gate_m_;
@@ -171,6 +173,11 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
   }
 
   meas_valid_ = basic_pass && rigorous_pass;
+
+  // 只有门控通过时才“对齐/切板”，避免 rejection 帧把随机 best_i 传播到下游，造成瞄点/可视化跳变。
+  if (meas_valid_) {
+    meas_plate_id_ = best_i;
+  }
 
   // [日志] 记录门控信息
   REC.set("plate_id", best_i);
@@ -199,9 +206,11 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
   }
 
   // 对前哨站而言，我们始终能给出3块装甲板的预测位置，因此在 TRACKING 时允许 Aimer 进行多板选点。
-  // last_id 用于记录当前帧观测匹配到的装甲板编号（debug/可视化/下游选点参考）。
+  // last_id 用于记录当前帧“可信观测”匹配到的装甲板编号（debug/可视化/下游选点参考）。
   jumped = true;
-  last_id = best_i;
+  if (meas_valid_) {
+    last_id = best_i;
+  }
 }
 
 void OutpostTarget::update_omega_from_observation_xy(
@@ -412,10 +421,11 @@ void OutpostTarget::update_ekf(const Armor & armor)
   z_obs << armor.xyz_in_world[0], armor.xyz_in_world[1];
 
   // 状态: [cx, vx, cy, vy, phase0] (5维)
-  // 当前帧观测对应的装甲板角度：phase0 + meas_plate_id*120deg
+  // 当前帧观测对应的装甲板角度：phase0 + plate_id*120deg
   const double phase0 = ekf_.x[4];
   const double r = outpost_radius_;  // 常量半径
-  const double angle = tools::limit_rad(phase0 + meas_plate_id_ * 2.0 * M_PI / 3.0);
+  const int plate_id_for_update = meas_plate_id_for_update_;
+  const double angle = tools::limit_rad(phase0 + plate_id_for_update * 2.0 * M_PI / 3.0);
 
   // 观测雅可比 (2x5)
   // ax = cx - r cos(angle)
@@ -452,7 +462,7 @@ void OutpostTarget::update_ekf(const Armor & armor)
   auto h_func = [&](const Eigen::VectorXd & x) -> Eigen::Vector2d {
     const double cx_ = x[0], cy_ = x[2];
     const double phase0_ = x[4];
-    const double angle_ = tools::limit_rad(phase0_ + meas_plate_id_ * 2.0 * M_PI / 3.0);
+    const double angle_ = tools::limit_rad(phase0_ + plate_id_for_update * 2.0 * M_PI / 3.0);
     const double ax = cx_ - r * std::cos(angle_);
     const double ay = cy_ - r * std::sin(angle_);
     return {ax, ay};
