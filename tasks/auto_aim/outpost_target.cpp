@@ -256,9 +256,16 @@ void OutpostTarget::update_omega_from_observation_xy(
   REC.set("dt_pll", dt_pll);
 
   if (dt_pll > 0.0 && dt_pll < 0.12) {
-    // 前几帧用较大的 Kp 快速点火，之后用较小的 Kp 平滑跟踪
-    const double Kp = (update_count_ < 5) ? (pll_Kp_ * 2.0) : pll_Kp_;
-    omega_est_ += Kp * phase_err * dt_pll;
+    // [改进] 大幅降低 PLL 增益，防止 omega 跳变
+    // 启动期稍大一点帮助点火，稳定期用很小的增益
+    const double Kp = (update_count_ < 5) ? (pll_Kp_ * 0.5) : (pll_Kp_ * 0.25);
+    const double delta_omega = Kp * phase_err * dt_pll;
+
+    // [关键] omega 变化率限幅：防止单帧跳变太大
+    // 启动期允许更快变化（5 rad/s²），稳定期严格（2 rad/s²）
+    const double max_rate = (update_count_ < 15) ? 5.0 : 2.0;
+    const double max_delta = max_rate * dt_pll;
+    omega_est_ += std::clamp(delta_omega, -max_delta, max_delta);
   }
 
   // ========== 滑窗回归部分：用展开相位序列拟合 omega ==========
@@ -273,9 +280,9 @@ void OutpostTarget::update_omega_from_observation_xy(
   // 去中心化的相位差（观测残差）
   const double dphase_centered = tools::limit_rad(obs_phase0 - last_obs_phase_ - pred_dphase);
 
-  // [改进] 动态门限：启动期宽容（omega 还没起来），稳定期严格
-  // 0.8 rad ≈ 45度，对于 centred residual 来说已经很宽了
-  const double jump_gate = (std::abs(omega_est_) < 0.5) ? 1.5 : 0.8;
+  // [改进] 动态门限：更宽容，减少误触发导致的回归窗口清空
+  // 1.2 rad ≈ 70度，只有非常大的跳变才触发
+  const double jump_gate = (std::abs(omega_est_) < 0.5) ? 2.0 : 1.2;
   const bool jump_triggered = last_obs_phase_valid_ && std::abs(dphase_centered) >= jump_gate;
 
   // [日志] 记录滑窗回归相关数据
@@ -352,9 +359,15 @@ void OutpostTarget::update_omega_from_observation_xy(
 
     if (den > 1e-9) {
       const double omega_regress = num / den;
-      // 融合 PLL 和回归结果：回归更稳定，权重逐渐增大
-      const double regress_weight = std::min(1.0, update_count_ / 15.0);
-      omega_est_ = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_regress;
+      // [改进] 更快切换到回归主导，回归更稳定
+      const double regress_weight = std::min(1.0, update_count_ / 8.0);
+
+      // 融合时也限制变化率
+      const double omega_fused = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_regress;
+      const double omega_diff = omega_fused - omega_est_;
+      const double max_diff = 0.1;  // 单次融合最大变化 0.1 rad/s
+      omega_est_ += std::clamp(omega_diff, -max_diff, max_diff);
+
       REC.set("omega_regress", omega_regress);
       REC.set("regress_weight", regress_weight);
     }
@@ -381,13 +394,12 @@ void OutpostTarget::init_ekf(const Armor & armor)
   x0 << cx, 0, cy, 0, armor_yaw;
 
   // ============ P0 设计哲学 ============
-  // 前哨站中心静止，所有参数都应体现这个强先验：
-  // - 位置：第一帧 PnP 的 armor_yaw 可能有误差，初始中心估计可能偏 5-10cm
-  //         所以位置不确定性设为 0.25（σ=0.5m），允许 EKF 慢慢修正
-  // - 速度：我们 *知道* 速度应该是 0，不确定性设为极小值 0.01（σ=0.1m/s）
-  //         这样 EKF 不会轻易相信中心在移动
+  // 前哨站中心静止，速度被完全压死：
+  // - 位置：初始 PnP 有误差，给一定不确定性让 EKF 修正
+  // - 速度：被强制归零，设极小不确定性（不让 EKF 估计速度）
+  // - 相位：第一帧 yaw 可能有误差，给一定不确定性
   Eigen::VectorXd P0_dig(5);
-  P0_dig << 0.25, 0.01, 0.25, 0.01, 0.4;
+  P0_dig << 0.04, 1e-6, 0.04, 1e-6, 0.4;  // 位置σ=0.2m，速度σ≈0，相位σ=0.63rad
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
   auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
@@ -493,16 +505,9 @@ void OutpostTarget::update_ekf(const Armor & armor)
   ekf_.update(z_obs, H, R, h_func, z_subtract);
 
   // ============ Update 后速度约束 ============
-  // EKF update 可能注入速度，必须立即约束，与 predict 中的约束保持一致
-  const double max_vel = 0.05;  // 与 predict 中一致：5cm/s
-  ekf_.x[1] = std::clamp(ekf_.x[1], -max_vel, max_vel);
-  ekf_.x[3] = std::clamp(ekf_.x[3], -max_vel, max_vel);
-
-  // rejection 帧直接归零：完全不相信这帧的速度信息
-  if (!meas_valid_) {
-    ekf_.x[1] = 0.0;
-    ekf_.x[3] = 0.0;
-  }
+  // 前哨站中心静止，EKF update 可能注入速度，必须立即压死
+  ekf_.x[1] = 0.0;
+  ekf_.x[3] = 0.0;
 
   // [日志] 记录 EKF 状态
   REC.set("sigma_xy", sigma_xy);
@@ -544,6 +549,7 @@ void OutpostTarget::update_pitch_tracking(double pitch)
   }
 }
 
+
 bool OutpostTarget::pitch_stable() const
 {
   return pitch_variation_ < pitch_stable_threshold_;
@@ -562,6 +568,9 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
   REC.set("state", state_ == OutpostState::TRACKING ? 1 : 0);
   REC.set("obs_x", armor.xyz_in_world[0]);
   REC.set("obs_y", armor.xyz_in_world[1]);
+  // 注意：obs_z 在 update_ekf() 中会被写成滤波后的 observed_z_。
+  // 为避免覆盖导致原始观测丢失，这里额外保留一份 raw。
+  REC.set("obs_z_raw", armor.xyz_in_world[2]);
   REC.set("obs_z", armor.xyz_in_world[2]);
   REC.set("obs_yaw", armor.ypr_in_world[0]);
   REC.set("obs_pitch", armor.ypd_in_world[1]);
@@ -710,13 +719,11 @@ void OutpostTarget::predict(double dt)
     Eigen::VectorXd x_prior = F * x;
 
     // ============ 速度约束哲学 ============
-    // 前哨站中心静止，速度只是为了平滑单帧观测噪声，不应累积：
-    // - 激进阻尼：每帧衰减 50%，速度快速归零
-    // - 严格限幅：最大 5cm/s，中心几乎不动
-    const double vel_decay = 0.5;   // 每帧衰减 50%（原 5%，太慢导致速度累积）
-    const double max_vel = 0.05;    // 最大 5cm/s（原 30cm/s，太大）
-    x_prior[1] = std::clamp(x_prior[1] * vel_decay, -max_vel, max_vel);
-    x_prior[3] = std::clamp(x_prior[3] * vel_decay, -max_vel, max_vel);
+    // 前哨站中心是**静止的**，速度估计只会引入漂移：
+    // - 极端阻尼：每帧直接归零，彻底压死速度估计
+    // - 这样中心位置完全由观测驱动，不会累积漂移
+    x_prior[1] = 0.0;  // 直接归零，前哨站中心不会移动
+    x_prior[3] = 0.0;
 
     // phase0 由 omega_est_ 外推
     x_prior[4] = tools::limit_rad(x_prior[4] + omega_est_ * dt);

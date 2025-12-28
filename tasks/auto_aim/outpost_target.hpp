@@ -87,7 +87,8 @@ private:
   double omega_max_abs_ = 2.51;
 
   // PLL 参数：omega += Kp * phase_error
-  double pll_Kp_ = 8.0;  // 比例增益，越大收敛越快但越容易振荡
+  // [改进] 降低增益，配合变化率限幅使用
+  double pll_Kp_ = 4.0;  // 原 8.0，太大导致 omega 跳变
 
   // PLL 辅助状态：缓存本帧 update 前的预测相位，以及用于 dt 计算的时间戳
   double phase0_pred_before_update_ = 0.0;
