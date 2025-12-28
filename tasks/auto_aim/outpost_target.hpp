@@ -129,9 +129,9 @@ private:
   // (x,y) 残差门控：
   // - 绝对门控：最小残差若仍然过大，则本帧跳过 EKF 更新/omega 更新
   // - 比值门控：最小残差必须显著优于第二名，避免中心漂移时三个都大但仍选出一个
-  // [修复] 放宽门控，原值太严导致 66% 拒绝率
-  double xy_residual_gate_m_ = 0.25;          // 25cm（原 18cm）
-  double xy_residual_ratio_gate_ = 0.8;       // 比值门控放宽（原 0.7）
+  // [修复] 放宽门控：前哨站半径0.28m，PnP误差+z层差异，0.30m更合理
+  double xy_residual_gate_m_ = 0.30;          // 30cm（原 25cm，考虑z层差异带来的透视误差）
+  double xy_residual_ratio_gate_ = 0.8;       // 比值门控（区分度）
 
   std::chrono::steady_clock::time_point last_update_time_;
 
