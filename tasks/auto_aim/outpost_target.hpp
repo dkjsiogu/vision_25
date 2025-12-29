@@ -177,6 +177,12 @@ private:
   // 但 EKF 的观测模型仍使用该候选编号以尽可能匹配当前观测。
   int meas_plate_id_for_update_ = 0;
   bool meas_valid_ = true;
+
+  // 板号切换滞回保护：防止误匹配导致的频繁切板抖动
+  int plate_switch_candidate_ = -1;  // 候选切换目标
+  int plate_switch_count_ = 0;       // 连续确认帧数
+  static constexpr int PLATE_SWITCH_HYSTERESIS = 3;  // 需要连续 N 帧才允许切板
+
   double last_obs_phase_ = 0.0;
   std::chrono::steady_clock::time_point last_obs_time_;
   bool last_obs_phase_valid_ = false;

@@ -114,6 +114,8 @@ void OutpostTarget::reset()
   meas_plate_id_ = 0;
   meas_plate_id_for_update_ = 0;
   meas_valid_ = true;
+  plate_switch_candidate_ = -1;
+  plate_switch_count_ = 0;
   last_obs_phase_valid_ = false;
 }
 
@@ -178,9 +180,26 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
 
   meas_valid_ = basic_pass && rigorous_pass;
 
-  // 只有门控通过时才“对齐/切板”，避免 rejection 帧把随机 best_i 传播到下游，造成瞄点/可视化跳变。
+  // 板号切换滞回保护：防止误匹配导致的频繁切板
+  // 只有连续 N 帧候选板一致且与当前板不同时，才允许切板
   if (meas_valid_) {
-    meas_plate_id_ = best_i;
+    if (best_i == meas_plate_id_) {
+      // 仍是当前板，重置候选
+      plate_switch_candidate_ = -1;
+      plate_switch_count_ = 0;
+    } else if (best_i == plate_switch_candidate_) {
+      // 候选板连续确认
+      plate_switch_count_++;
+      if (plate_switch_count_ >= PLATE_SWITCH_HYSTERESIS) {
+        meas_plate_id_ = best_i;
+        plate_switch_candidate_ = -1;
+        plate_switch_count_ = 0;
+      }
+    } else {
+      // 新候选板
+      plate_switch_candidate_ = best_i;
+      plate_switch_count_ = 1;
+    }
   }
 
   // [日志] 记录门控信息
@@ -362,11 +381,12 @@ void OutpostTarget::update_omega_from_observation_xy(
       // [改进] 更快切换到回归主导，回归更稳定
       const double regress_weight = std::min(1.0, update_count_ / 8.0);
 
-      // [修复] 放宽变化率限制：0.1→0.3 rad/s，让 omega 能追上真实值
-      // 数据分析显示 omega_regress≈2.84 但 omega_est 卡在 2.28，差 0.56
+      // [修复] 变化率限制改为与 dt 成比例，确保不同帧率行为一致
+      // 12 rad/s² × 0.025s ≈ 0.3 rad/s（与之前 42Hz 下等效）
       const double omega_fused = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_regress;
       const double omega_diff = omega_fused - omega_est_;
-      const double max_diff = 0.3;  // 单次融合最大变化 0.3 rad/s（原 0.1）
+      const double omega_fuse_rate = 12.0;  // rad/s²
+      const double max_diff = omega_fuse_rate * dt_step;
       omega_est_ += std::clamp(omega_diff, -max_diff, max_diff);
 
       REC.set("omega_regress", omega_regress);
@@ -395,12 +415,12 @@ void OutpostTarget::init_ekf(const Armor & armor)
   x0 << cx, 0, cy, 0, armor_yaw;
 
   // ============ P0 设计哲学 ============
-  // 前哨站中心静止，速度被完全压死：
+  // 采用"强先验 + 慢漂移"模型：
   // - 位置：初始 PnP 有误差，给一定不确定性让 EKF 修正
-  // - 速度：被强制归零，设极小不确定性（不让 EKF 估计速度）
+  // - 速度：从 0 开始，允许缓慢变化（配合 Q 矩阵和 predict 中的阻尼）
   // - 相位：第一帧 yaw 可能有误差，给一定不确定性
   Eigen::VectorXd P0_dig(5);
-  P0_dig << 0.04, 1e-6, 0.04, 1e-6, 0.4;  // 位置σ=0.2m，速度σ≈0，相位σ=0.63rad
+  P0_dig << 0.04, 0.01, 0.04, 0.01, 0.4;  // 位置σ=0.2m，速度σ=0.1m/s，相位σ=0.63rad
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
   auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
