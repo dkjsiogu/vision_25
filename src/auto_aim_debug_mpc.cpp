@@ -1,5 +1,6 @@
 #include <fmt/core.h>
 #include <fmt/format.h>
+#include <yaml-cpp/yaml.h>
 
 #include <atomic>
 #include <chrono>
@@ -20,6 +21,7 @@
 #include "tools/math_tools.hpp"
 #include "tools/plotter.hpp"
 #include "tools/thread_safe_queue.hpp"
+#include "tools/timing_validator.hpp"
 #include "tools/visualizer_3d.hpp"
 
 using namespace std::chrono_literals;
@@ -51,6 +53,22 @@ int main(int argc, char * argv[])
 
   // 启用前哨站调试日志
   tools::DebugRecorder::instance("outpost").enable("outpost_log.csv");
+
+  // 读取 timing 验证开关
+  auto yaml = YAML::LoadFile(config_path);
+  bool timing_validation_enabled = false;
+  if (yaml["timing_validation_enabled"]) {
+    timing_validation_enabled = yaml["timing_validation_enabled"].as<bool>();
+  }
+  tools::TimingValidator timing_validator;
+  if (timing_validation_enabled) {
+    timing_validator.enable("timing_validation.csv");
+    tools::logger()->info("[TimingValidator] Enabled, output: timing_validation.csv");
+  }
+
+  // 存储 q 和时间戳用于 timing 验证
+  Eigen::Quaterniond last_q = Eigen::Quaterniond::Identity();
+  std::chrono::steady_clock::time_point last_imu_t;
 
   tools::ThreadSafeQueue<std::optional<auto_aim::Target>, true> target_queue(1);
   target_queue.push(std::nullopt);
@@ -133,8 +151,34 @@ int main(int argc, char * argv[])
     auto q = gimbal.q(t);
     auto gs = gimbal.state();
 
+    // 记录当前帧的 q（用于 timing 验证）
+    last_q = q;
+    last_imu_t = t;  // gimbal.q(t) 会插值到这个时间点
+
     solver.set_R_gimbal2world(q);
     auto armors = yolo.detect(img);
+
+    // Timing 验证：对每个检测到的 armor，记录原始观测数据
+    if (timing_validator.is_enabled() && !armors.empty()) {
+      for (auto & armor : armors) {
+        // 调用 solve 获取 xyz_in_gimbal, xyz_in_world
+        solver.solve(armor);
+
+        timing_validator.record(
+          t,                          // cam_t
+          last_imu_t,                 // imu_t (插值目标时间)
+          gs.yaw, gs.pitch,           // 云台角度
+          last_q,                     // IMU 四元数
+          armor.xyz_in_gimbal,        // 云台系坐标
+          armor.xyz_in_world,         // "世界"系坐标
+          armor.ypr_in_world[0],      // armor yaw
+          armor.ypr_in_world[1],      // armor pitch
+          armor.ypd_in_world[2],      // 距离
+          auto_aim::ARMOR_NAMES[armor.name]
+        );
+      }
+    }
+
     auto targets = tracker.track(armors, t);
     if (!targets.empty())
       target_queue.push(targets.front());
