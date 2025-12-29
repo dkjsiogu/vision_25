@@ -615,17 +615,55 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     last_update_time_ = t;
 
     // 初始化帧也提交调试记录，避免 recorder 时间轴错位
+    // [重要] 必须在第一次 commit() 前设置所有可能的字段，否则 CSV 表头会缺列
     REC.set("state", 1);  // 刚进入 TRACKING
     REC.set("dt", 0.0);   // 初始化帧没有 dt
     REC.set("omega", omega_est_);
     REC.set("meas_valid", true);
     REC.set("meas_plate_id", meas_plate_id_);
+    REC.set("meas_plate_id_for_update", meas_plate_id_);
     REC.set("z0", plate_z_[0]);
     REC.set("z1", plate_z_[1]);
     REC.set("z2", plate_z_[2]);
     REC.set("z0_valid", plate_z_valid_[0] ? 1 : 0);
     REC.set("z1_valid", plate_z_valid_[1] ? 1 : 0);
     REC.set("z2_valid", plate_z_valid_[2] ? 1 : 0);
+    // align_phase_to_observation_xy 的字段
+    REC.set("plate_id", meas_plate_id_);
+    REC.set("best_err", 0.0);
+    REC.set("second_err", 0.0);
+    REC.set("err0", 0.0);
+    REC.set("err1", 0.0);
+    REC.set("err2", 0.0);
+    REC.set("ratio", 0.0);
+    REC.set("basic_pass", true);
+    REC.set("rigor_pass", true);
+    REC.set("pred_x", armor.xyz_in_world[0]);
+    REC.set("pred_y", armor.xyz_in_world[1]);
+    REC.set("res_x", 0.0);
+    REC.set("res_y", 0.0);
+    // update_ekf 的字段
+    REC.set("sigma_xy", 0.0);
+    REC.set("cx", ekf_.x[0]);
+    REC.set("vx", ekf_.x[1]);
+    REC.set("cy", ekf_.x[2]);
+    REC.set("vy", ekf_.x[3]);
+    REC.set("phase0", ekf_.x[4]);
+    REC.set("radius", outpost_radius_);
+    REC.set("pitch_var", pitch_variation_);
+    REC.set("pitch_stable", pitch_stable());
+    REC.set("obs_z", observed_z_);
+    REC.set("update_cnt", update_count_);
+    // update_omega_from_observation_xy 的字段
+    REC.set("obs_phase0", 0.0);
+    REC.set("phase_err", 0.0);
+    REC.set("dt_pll", 0.0);
+    REC.set("dphase_centered", 0.0);
+    REC.set("jump_gate", 0.0);
+    REC.set("jump_triggered", 0);
+    REC.set("window_size", 0);
+    REC.set("omega_regress", 0.0);
+    REC.set("regress_weight", 0.0);
     REC.commit();
     return true;
   }
