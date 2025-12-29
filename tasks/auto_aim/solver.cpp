@@ -56,7 +56,29 @@ void Solver::set_R_gimbal2world(const Eigen::Quaterniond & q)
   matrices_cache_valid_ = true;
 }
 
-//solvePnP（获得姿态）
+// ============================================================================
+// 坐标系定义（重要！）
+// ============================================================================
+// 1. camera frame:   相机光心为原点，z 朝前，x 朝右，y 朝下
+// 2. gimbal frame:   云台旋转中心为原点，机械安装决定的固定姿态
+// 3. "world" frame:  【注意】这不是场地固定坐标系！
+//                    - 原点：与 gimbal frame 相同（云台旋转中心）
+//                    - 姿态：由 IMU 给出的重力对齐方向（z 朝上）
+//
+// 因此 xyz_in_world 的含义是：
+//   "从云台原点指向目标的向量，用重力对齐的方向表达"
+//
+// 这意味着：
+//   - 当车体平移时，同一个场地固定目标的 xyz_in_world 会变化
+//   - 当云台转动时，如果 IMU 姿态补偿正确，xyz_in_world 应该不变
+//   - OutpostTarget 的 "中心" (cx, cy) 是相对位置，会随车体移动
+//
+// 如果需要场地固定坐标系，需要额外引入：
+//   - 云台在场地中的位置（来自里程计/定位系统）
+//   - 完整的 T_gimbal2world = [R | t]，而不仅仅是 R
+// ============================================================================
+
+// solvePnP（获得姿态）
 void Solver::solve(Armor & armor) const
 {
   const auto & object_points =
@@ -70,6 +92,9 @@ void Solver::solve(Armor & armor) const
   Eigen::Vector3d xyz_in_camera;
   cv::cv2eigen(tvec, xyz_in_camera);
   armor.xyz_in_gimbal = R_camera2gimbal_ * xyz_in_camera + t_camera2gimbal_;
+
+  // 【关键】这是纯旋转变换，没有平移项！
+  // xyz_in_world = R * xyz_in_gimbal，原点仍在云台
   armor.xyz_in_world = R_gimbal2world_ * armor.xyz_in_gimbal;
 
   cv::Mat rmat;
