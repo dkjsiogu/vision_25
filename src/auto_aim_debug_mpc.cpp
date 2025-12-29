@@ -54,9 +54,9 @@ int main(int argc, char * argv[])
   // 启用前哨站调试日志
   tools::DebugRecorder::instance("outpost").enable("outpost_log.csv");
 
-  // 读取 timing 验证开关
+  // 读取 timing 验证开关（默认开启）
   auto yaml = YAML::LoadFile(config_path);
-  bool timing_validation_enabled = false;
+  bool timing_validation_enabled = true;
   if (yaml["timing_validation_enabled"]) {
     timing_validation_enabled = yaml["timing_validation_enabled"].as<bool>();
   }

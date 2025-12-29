@@ -22,9 +22,8 @@ namespace tools
  *   - 固定目标：xyz_in_world 应不随云台角度变化
  *   - 前哨站：旋转中心应稳定
  *
- * 使用方法：
- *   在 yaml 中设置 timing_validation_enabled: true
- *   输出文件：timing_validation.csv
+ * 默认开启，输出文件：timing_validation.csv
+ * 如需关闭，在 yaml 中设置 timing_validation_enabled: false
  */
 class TimingValidator
 {
