@@ -180,6 +180,12 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
 
   meas_valid_ = basic_pass && rigorous_pass;
 
+  // 门控失败：不累计滞回状态，避免把旧候选带到下一次 valid 帧。
+  if (!meas_valid_) {
+    plate_switch_candidate_ = -1;
+    plate_switch_count_ = 0;
+  }
+
   // 板号切换滞回保护：防止误匹配导致的频繁切板
   // 只有连续 N 帧候选板一致且与当前板不同时，才允许切板
   if (meas_valid_) {
@@ -235,7 +241,8 @@ void OutpostTarget::align_phase_to_observation_xy(const Armor & armor)
   // last_id 用于记录当前帧“可信观测”匹配到的装甲板编号（debug/可视化/下游选点参考）。
   jumped = true;
   if (meas_valid_) {
-    last_id = best_i;
+    // 对外暴露稳定板号，避免短时误匹配/切板抖动影响下游。
+    last_id = meas_plate_id_;
   }
 }
 
@@ -250,11 +257,15 @@ void OutpostTarget::update_omega_from_observation_xy(
   const double obs_x = armor.xyz_in_world[0];
   const double obs_y = armor.xyz_in_world[1];
 
+  // 内部相位/omega 估计使用“本帧几何残差最小”的候选板号，避免滞回造成的 120° 映射错误。
+  const int plate_id_for_phase = meas_plate_id_for_update_;
+
   // 用中心->装甲板的几何关系反推出"观测相位"（不依赖 PnP 的装甲板朝向 yaw）。
   // armor_x = cx - r cos(phase) => (cx - armor_x, cy - armor_y) 与 (cos,sin) 同向
   const double obs_phase_plate = std::atan2(cy - obs_y, cx - obs_x);
   // 转换为"plate0"的相位观测，避免切板造成的 120° 跳变污染 omega
-  const double obs_phase0 = tools::limit_rad(obs_phase_plate - meas_plate_id_ * 2.0 * M_PI / 3.0);
+  const double obs_phase0 =
+    tools::limit_rad(obs_phase_plate - plate_id_for_phase * 2.0 * M_PI / 3.0);
 
   // ========== PLL 部分：用相位误差修正 omega ==========
   // 使用"predict后、update前"的相位作为预测值，避免 update_ekf() 已经吃入观测导致误差被人为变小。
@@ -292,6 +303,23 @@ void OutpostTarget::update_omega_from_observation_xy(
   double dt_step = 0.0;
   if (last_obs_phase_valid_) {
     dt_step = tools::delta_time(t, last_obs_time_);
+  }
+
+  // dt 异常：直接重置回归窗口，避免 dt 缩放导致一次性大跳。
+  if (last_obs_phase_valid_ && (dt_step <= 0.0 || dt_step > 0.12)) {
+    unwrapped_phase_history_.clear();
+    phase_time_history_.clear();
+    unwrapped_phase_accum_ = 0.0;
+    window_base_time_ = t;
+    window_base_time_valid_ = true;
+
+    last_obs_phase_ = obs_phase0;
+    last_obs_time_ = t;
+    last_obs_phase_valid_ = true;
+
+    unwrapped_phase_history_.push_back(unwrapped_phase_accum_);
+    phase_time_history_.push_back(0.0);
+    return;
   }
 
   // 预测增量：基于当前 omega 估计
@@ -702,7 +730,8 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
   // 更新 z：只更新“可信观测”的那一块板，避免三层互相污染。
   if (meas_valid_) {
-    const int zid = meas_plate_id_;
+    // z 归属应跟随本帧观测所对应的候选板号；切板滞回只影响对外暴露板号。
+    const int zid = meas_plate_id_for_update_;
     const double alpha = pitch_stable() ? observed_z_alpha_stable_ : observed_z_alpha_unstable_;
     if (!plate_z_valid_[zid]) {
       plate_z_[zid] = obs_z;
