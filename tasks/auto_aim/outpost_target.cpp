@@ -420,6 +420,17 @@ void OutpostTarget::update_omega_from_observation_xy(
     if (den > 1e-9) {
       double omega_regress_raw = num / den;
 
+      // [防护] NaN/inf 检测：异常值直接跳过本帧回归更新
+      if (!std::isfinite(omega_regress_raw)) {
+        REC.set("omega_regress_raw", 0.0);
+        REC.set("omega_regress", 0.0);
+        REC.set("omega_regress_ema", omega_regress_ema_);
+        REC.set("regress_weight", 0.0);
+        REC.set("prior_weight", 0.0);
+        REC.set("regress_hit_limit", 1);  // 当作异常帧
+        return;
+      }
+
       // [改进] 回归限幅：用 omega_regress_max_abs_ 裁掉极端值
       // 记录是否触顶，用于决定先验权重
       const bool regress_hit_limit =
