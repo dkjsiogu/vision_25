@@ -48,6 +48,19 @@ Eigen::Matrix3d Solver::R_gimbal2world() const { return R_gimbal2world_; }
 
 void Solver::set_R_gimbal2world(const Eigen::Quaterniond & q)
 {
+  // ============================================================================
+  // 关键假设：q 描述的是"云台系相对于重力对齐系"的姿态
+  // ============================================================================
+  // 这要求 IMU 装在云台上（而非底盘上）。
+  // 如果 IMU 装在底盘上，需要额外用 gs.yaw/pitch（编码器角度）修正：
+  //   R_gimbal2chassis = R_yaw(yaw) * R_pitch(pitch)
+  //   R_gimbal2world = R_chassis2world * R_gimbal2chassis
+  //
+  // 验证方法：云台慢转时，观察 q 是否变化。
+  //   - 变化 → IMU 在云台上，当前代码正确
+  //   - 不变 → IMU 在底盘上，需要修改此函数
+  // ============================================================================
+
   Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
   R_gimbal2world_ = R_gimbal2imubody_.transpose() * R_imubody2imuabs * R_gimbal2imubody_;
 
