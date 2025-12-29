@@ -475,7 +475,9 @@ void OutpostTarget::update_ekf(const Armor & armor)
   H(1, 2) = 1.0;
   H(1, 4) = -r * std::cos(angle);
 
-  // 观测噪声：用距离粗略缩放。pitch 不稳定时整体加大 (x,y) 噪声，避免高度抖动导致的解算漂移拖拽中心/相位。
+  // 观测噪声：用距离粗略缩放。
+  // [修复] 对于前哨站，pitch 跳变是装甲板切换的正常结果，不应惩罚 (x,y) 观测。
+  // pitch_stable 仅用于控制 z 值的更新速率（在 update() 中处理）。
   double sigma_xy;
   if (!meas_valid_) {
     // 门控失败：用超大噪声做软锚定，防止中心飞走
@@ -484,9 +486,8 @@ void OutpostTarget::update_ekf(const Armor & armor)
     const double dist = std::max(0.0, armor.ypd_in_world[2]);
     sigma_xy = sigma_xy_base_ + sigma_xy_k_ * dist;
     sigma_xy = std::clamp(sigma_xy, sigma_xy_min_, sigma_xy_max_);
-    if (!pitch_stable()) {
-      sigma_xy *= std::sqrt(pitch_unstable_r_scale_);
-    }
+    // 注意：不再对 pitch_unstable 情况惩罚 (x,y) 观测
+    // 前哨站的 pitch 跳变是三层高度切换的几何效应，(x,y) 观测仍然有效
   }
   Eigen::VectorXd R_dig(2);
   R_dig << sigma_xy * sigma_xy, sigma_xy * sigma_xy;
