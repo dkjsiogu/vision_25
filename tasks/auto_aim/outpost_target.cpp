@@ -362,10 +362,11 @@ void OutpostTarget::update_omega_from_observation_xy(
       // [改进] 更快切换到回归主导，回归更稳定
       const double regress_weight = std::min(1.0, update_count_ / 8.0);
 
-      // 融合时也限制变化率
+      // [修复] 放宽变化率限制：0.1→0.3 rad/s，让 omega 能追上真实值
+      // 数据分析显示 omega_regress≈2.84 但 omega_est 卡在 2.28，差 0.56
       const double omega_fused = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_regress;
       const double omega_diff = omega_fused - omega_est_;
-      const double max_diff = 0.1;  // 单次融合最大变化 0.1 rad/s
+      const double max_diff = 0.3;  // 单次融合最大变化 0.3 rad/s（原 0.1）
       omega_est_ += std::clamp(omega_diff, -max_diff, max_diff);
 
       REC.set("omega_regress", omega_regress);
