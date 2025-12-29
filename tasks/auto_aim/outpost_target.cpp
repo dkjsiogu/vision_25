@@ -468,12 +468,9 @@ void OutpostTarget::init_ekf(const Armor & armor)
 
 void OutpostTarget::update_ekf(const Armor & armor)
 {
-  // ============ 核心设计：前哨站中心静止 ============
-  // EKF update 会同时更新 (cx, cy, phase0)，但前哨站中心实际是静止的。
-  // PnP 观测有系统性偏差（视角变化），如果让 EKF 更新中心，会导致严重漂移。
-  // 解决方案：保存 cx, cy，update 后恢复，只让 EKF 更新 phase0。
-  const double cx_before = ekf_.x[0];
-  const double cy_before = ekf_.x[2];
+  // 说明：armor.xyz_in_world 是“以云台/相机为原点的目标相对位置向量，在世界方向系下表达”。
+  // 该量会随车体平移而变化，因此在生产端不能假设前哨站中心 (cx,cy) 永远不动。
+  // 这里采用“强先验 + 慢变化”的模型：允许 EKF 更新中心与速度，但过程噪声保持较小。
 
   // 观测量：直接用世界系装甲板 (x,y)
   // 这样 phase/omega 由位置序列驱动，不依赖 PnP 的装甲板朝向 yaw（该量在前哨站场景下很可能不稳定/近似常量）。
@@ -531,12 +528,11 @@ void OutpostTarget::update_ekf(const Armor & armor)
 
   ekf_.update(z_obs, H, R, h_func, z_subtract);
 
-  // ============ Update 后位置/速度约束 ============
-  // 前哨站中心静止：恢复 cx, cy 到 update 前的值，只保留 phase0 的更新
-  ekf_.x[0] = cx_before;
-  ekf_.x[2] = cy_before;
-  ekf_.x[1] = 0.0;  // vx
-  ekf_.x[3] = 0.0;  // vy
+  // [改进] 门控失败时额外抑制速度，防止误匹配帧累积速度误差
+  if (!meas_valid_) {
+    ekf_.x[1] *= 0.8;  // vx 衰减 20%
+    ekf_.x[3] *= 0.8;  // vy 衰减 20%
+  }
 
   // [日志] 记录 EKF 状态
   REC.set("sigma_xy", sigma_xy);
@@ -724,10 +720,10 @@ void OutpostTarget::predict(double dt)
   // clang-format on
 
   // ============ Q 设计哲学 ============
-  // 前哨站中心静止：
-  // - v1（位置加速度方差）：极小，中心几乎不动
+  // 采用“强先验 + 慢变化”的中心运动模型：
+  // - v1（位置加速度方差）：偏小，使中心变化更平滑（但不强行锁死）
   // - vphi（相位噪声）：允许 omega 估计有些误差
-  double v1 = 0.01;      // 加速度 σ ≈ 0.1 m/s²（原 10，太大导致中心漂移）
+  double v1 = 0.01;      // 加速度 σ ≈ 0.1 m/s²；后续可结合日志再调
   double vphi = 0.2;     // 相位随机游走强度
 
   auto a = dt * dt * dt * dt / 4;
@@ -747,12 +743,17 @@ void OutpostTarget::predict(double dt)
   auto f = [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
     Eigen::VectorXd x_prior = F * x;
 
-    // ============ 速度约束哲学 ============
-    // 前哨站中心是**静止的**，速度估计只会引入漂移：
-    // - 极端阻尼：每帧直接归零，彻底压死速度估计
-    // - 这样中心位置完全由观测驱动，不会累积漂移
-    x_prior[1] = 0.0;  // 直接归零，前哨站中心不会移动
-    x_prior[3] = 0.0;
+    // [改进] 速度阻尼：防止 vx/vy 在没有观测校正时持续累积
+    // 阻尼因子 0.95：每帧衰减 5%，约 20 帧（0.3s）后衰减到 1/3
+    constexpr double vel_damping = 0.95;
+    x_prior[1] *= vel_damping;  // vx
+    x_prior[3] *= vel_damping;  // vy
+
+    // [改进] 速度限幅：前哨站中心相对云台的移动速度不应过大
+    // 0.3 m/s 足够覆盖正常车体移动（步兵典型速度 2-3 m/s，但相对距离变化更慢）
+    constexpr double max_vel = 0.3;
+    x_prior[1] = std::clamp(x_prior[1], -max_vel, max_vel);
+    x_prior[3] = std::clamp(x_prior[3], -max_vel, max_vel);
 
     // phase0 由 omega_est_ 外推
     x_prior[4] = tools::limit_rad(x_prior[4] + omega_est_ * dt);
