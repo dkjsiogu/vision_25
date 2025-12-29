@@ -430,8 +430,16 @@ void OutpostTarget::update_omega_from_observation_xy(
       // [改进] 更快切换到回归主导，回归更稳定
       const double regress_weight = std::min(1.0, update_count_ / 8.0);
 
-      // [修复] 使用平滑后的 omega_regress 进行融合
-      const double omega_fused = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_regress_ema_;
+      // [改进] 加入先验约束：omega 向理论速度靠拢（保持当前方向）
+      // 先验权重：稳定期生效（update_count > 10），防止极端值把 omega 拉偏
+      const double prior_weight = (update_count_ > 10) ? 0.1 : 0.0;
+      // 先验值：大小为理论值，符号跟随当前 omega（方向由观测决定）
+      const double omega_prior_signed = (omega_est_ >= 0) ? omega_prior_abs_ : -omega_prior_abs_;
+      const double omega_with_prior =
+        (1.0 - prior_weight) * omega_regress_ema_ + prior_weight * omega_prior_signed;
+
+      // [修复] 使用带先验的 omega 进行融合
+      const double omega_fused = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_with_prior;
       const double omega_diff = omega_fused - omega_est_;
       const double omega_fuse_rate = 15.0;  // 提高到 15 rad/s²，加快收敛
       const double max_diff = omega_fuse_rate * dt_step;
@@ -522,6 +530,8 @@ void OutpostTarget::init_ekf(const Armor & armor)
   jumped = true;
   last_id = best_i;
 
+  // [改进] 初始化 omega 为 0，让观测决定方向
+  // 不再用先验初始化，因为方向未知
   omega_est_ = 0.0;
   unwrapped_phase_history_.clear();
   phase_time_history_.clear();

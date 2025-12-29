@@ -101,7 +101,8 @@ private:
   // omega 独立估计（不放入 EKF），用于预测 phase0
   // 使用 PLL + 滑窗回归：比差分+EMA更稳定
   double omega_est_ = 0.0;
-  double omega_max_abs_ = 3.5;  // 提高限幅：数据显示 omega_regress 可达 2.84
+  double omega_max_abs_ = 3.0;  // 降低限幅：减少极端值影响
+  double omega_prior_abs_ = 2.51;  // 先验速度大小：0.8π rad/s（方向由观测决定）
 
   // PLL 参数：omega += Kp * phase_error
   // [改进] 降低增益，配合变化率限幅使用
