@@ -71,7 +71,7 @@ private:
 
   // 前哨站三层高度独立存储（从 OutpostTarget 传入）
   std::array<double, 3> plate_z_{{0.0, 0.0, 0.0}};
-  bool plate_z_valid_ = false;
+  std::array<bool, 3> plate_z_valid_{{false, false, false}};
 
   double observed_z_ = 0.0;       // 前哨站：最近观测到的 z 值
   bool observed_z_valid_ = false; // 观测 z 是否有效

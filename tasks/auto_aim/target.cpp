@@ -104,8 +104,8 @@ Target::Target(
   if (name == ArmorName::outpost && armor_list.size() == 3) {
     for (size_t i = 0; i < 3; i++) {
       plate_z_[i] = armor_list[i][2];  // [x, y, z, angle] 中的 z
+      plate_z_valid_[i] = true;
     }
-    plate_z_valid_ = true;
     observed_z_ = ekf_x[4];  // 同时设置 observed_z_ 作为默认值
     observed_z_valid_ = true;
   }
@@ -183,17 +183,9 @@ void Target::predict(double dt)
 
 void Target::update(const Armor & armor)
 {
-  // 前哨站：记录观测到的 z 值（滑动平均）
-  if (name == ArmorName::outpost) {
-    double obs_z = armor.xyz_in_world[2];
-    if (!observed_z_valid_) {
-      observed_z_ = obs_z;
-      observed_z_valid_ = true;
-    } else {
-      // 滑动平均，快速跟随高度变化
-      observed_z_ = observed_z_ * 0.3 + obs_z * 0.7;
-    }
-  }
+  // 注意：前哨站不走此函数！前哨站使用 OutpostTarget::update()，
+  // 然后通过 Tracker::outpost_to_target() 构造 Target。
+  // 前哨站的 per-plate z 在 OutpostTarget 中处理，通过 armor_list 传入构造函数。
 
   // 装甲板匹配
   int id;
@@ -348,7 +340,7 @@ Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
   // - 前哨站：使用各板独立的 z（plate_z_[id]）
   // - 其他目标：使用 EKF 估计的 z
   double armor_z;
-  if (name == ArmorName::outpost && plate_z_valid_ && id >= 0 && id < 3) {
+  if (name == ArmorName::outpost && id >= 0 && id < 3 && plate_z_valid_[id]) {
     armor_z = plate_z_[id];  // 使用该板独立的 z
   } else if (name == ArmorName::outpost && observed_z_valid_) {
     armor_z = observed_z_;   // 回退到单一 z
