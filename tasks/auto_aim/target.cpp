@@ -141,8 +141,9 @@ void Target::predict(double dt)
   // https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python/blob/master/07-Kalman-Filter-Math.ipynb
   double v1, v2;
   if (name == ArmorName::outpost) {
-    v1 = 10;   // 前哨站加速度方差
-    v2 = 0.1;  // 前哨站角加速度方差
+    // [修复] 与 OutpostTarget 保持一致：中心静止，噪声极小
+    v1 = 0.01;  // 加速度方差（原10，与OutpostTarget不一致）
+    v2 = 0.2;   // 角加速度方差（原0.1，与OutpostTarget的vphi对齐）
   } else {
     v1 = 100;  // 加速度方差
     v2 = 400;  // 角加速度方差
@@ -174,9 +175,8 @@ void Target::predict(double dt)
     return x_prior;
   };
 
-  // 前哨站转速特判
-  if (this->convergened() && this->name == ArmorName::outpost && std::abs(this->ekf_.x[7]) > 2)
-    this->ekf_.x[7] = this->ekf_.x[7] > 0 ? 2.51 : -2.51;
+  // 注意：前哨站的 omega 限幅已在 OutpostTarget 中处理，这里不再重复处理
+  // 原代码 (已移除): 如果 |omega| > 2，强制设为 ±2.51，这会导致预测误差
 
   ekf_.predict(F, Q, f);
 }
