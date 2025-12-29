@@ -448,9 +448,12 @@ void OutpostTarget::init_ekf(const Armor & armor)
 
 void OutpostTarget::update_ekf(const Armor & armor)
 {
-  // 门控失败时：不完全跳过，而是用超大噪声做"软锚定"
-  // 这样中心不会飞走，但也不会被错误观测带偏
-  const double rejection_sigma = 0.5;  // 门控失败时的大噪声 (m)
+  // ============ 核心设计：前哨站中心静止 ============
+  // EKF update 会同时更新 (cx, cy, phase0)，但前哨站中心实际是静止的。
+  // PnP 观测有系统性偏差（视角变化），如果让 EKF 更新中心，会导致严重漂移。
+  // 解决方案：保存 cx, cy，update 后恢复，只让 EKF 更新 phase0。
+  const double cx_before = ekf_.x[0];
+  const double cy_before = ekf_.x[2];
 
   // 观测量：直接用世界系装甲板 (x,y)
   // 这样 phase/omega 由位置序列驱动，不依赖 PnP 的装甲板朝向 yaw（该量在前哨站场景下很可能不稳定/近似常量）。
@@ -480,8 +483,8 @@ void OutpostTarget::update_ekf(const Armor & armor)
   // pitch_stable 仅用于控制 z 值的更新速率（在 update() 中处理）。
   double sigma_xy;
   if (!meas_valid_) {
-    // 门控失败：用超大噪声做软锚定，防止中心飞走
-    sigma_xy = rejection_sigma;
+    // 门控失败：用大噪声减少对 phase0 的影响
+    sigma_xy = 0.5;  // 50cm，门控失败时不信任观测
   } else {
     const double dist = std::max(0.0, armor.ypd_in_world[2]);
     sigma_xy = sigma_xy_base_ + sigma_xy_k_ * dist;
@@ -508,10 +511,12 @@ void OutpostTarget::update_ekf(const Armor & armor)
 
   ekf_.update(z_obs, H, R, h_func, z_subtract);
 
-  // ============ Update 后速度约束 ============
-  // 前哨站中心静止，EKF update 可能注入速度，必须立即压死
-  ekf_.x[1] = 0.0;
-  ekf_.x[3] = 0.0;
+  // ============ Update 后位置/速度约束 ============
+  // 前哨站中心静止：恢复 cx, cy 到 update 前的值，只保留 phase0 的更新
+  ekf_.x[0] = cx_before;
+  ekf_.x[2] = cy_before;
+  ekf_.x[1] = 0.0;  // vx
+  ekf_.x[3] = 0.0;  // vy
 
   // [日志] 记录 EKF 状态
   REC.set("sigma_xy", sigma_xy);
