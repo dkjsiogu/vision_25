@@ -119,7 +119,11 @@ private:
   double unwrapped_phase_accum_ = 0.0;     // 展开相位累积值
   std::chrono::steady_clock::time_point window_base_time_;  // 滑窗基准时间
   bool window_base_time_valid_ = false;
-  static constexpr size_t OMEGA_WINDOW_SIZE = 10;
+  static constexpr size_t OMEGA_WINDOW_SIZE = 20;  // 增大滑窗，减少回归波动
+
+  // omega_regress 滑动平均（减少单次回归噪声）
+  double omega_regress_ema_ = 0.0;
+  bool omega_regress_ema_valid_ = false;
 
   // z 估计：单目无法可靠判定“上中下层”，但在 TRACKING 状态下我们能稳定地给出
   // 三块装甲板的角度 id（0/1/2）。因此对每个 id 维护一条 z 估计，并且只在

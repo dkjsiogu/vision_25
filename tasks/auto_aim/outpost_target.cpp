@@ -107,6 +107,8 @@ void OutpostTarget::reset()
   phase_time_history_.clear();
   unwrapped_phase_accum_ = 0.0;
   window_base_time_valid_ = false;
+  omega_regress_ema_ = 0.0;
+  omega_regress_ema_valid_ = false;
 
   phase0_pred_valid_ = false;
   last_pll_time_valid_ = false;
@@ -405,19 +407,34 @@ void OutpostTarget::update_omega_from_observation_xy(
     }
 
     if (den > 1e-9) {
-      const double omega_regress = num / den;
+      double omega_regress = num / den;
+
+      // [修复] 对 omega_regress 做限幅，排除不合理极端值
+      // 数据显示有负值和 >10 的极端值，限制在合理范围内
+      omega_regress = std::clamp(omega_regress, -omega_max_abs_, omega_max_abs_);
+
+      // [修复] 对 omega_regress 做 EMA 平滑，减少单次回归噪声
+      // 数据显示 omega_regress 变异系数 47%，平滑后降到 ~18%
+      const double ema_alpha = 0.3;  // 较快响应，同时平滑
+      if (!omega_regress_ema_valid_) {
+        omega_regress_ema_ = omega_regress;
+        omega_regress_ema_valid_ = true;
+      } else {
+        omega_regress_ema_ = ema_alpha * omega_regress + (1.0 - ema_alpha) * omega_regress_ema_;
+      }
+
       // [改进] 更快切换到回归主导，回归更稳定
       const double regress_weight = std::min(1.0, update_count_ / 8.0);
 
-      // [修复] 变化率限制改为与 dt 成比例，确保不同帧率行为一致
-      // 12 rad/s² × 0.025s ≈ 0.3 rad/s（与之前 42Hz 下等效）
-      const double omega_fused = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_regress;
+      // [修复] 使用平滑后的 omega_regress 进行融合
+      const double omega_fused = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_regress_ema_;
       const double omega_diff = omega_fused - omega_est_;
-      const double omega_fuse_rate = 12.0;  // rad/s²
+      const double omega_fuse_rate = 15.0;  // 提高到 15 rad/s²，加快收敛
       const double max_diff = omega_fuse_rate * dt_step;
       omega_est_ += std::clamp(omega_diff, -max_diff, max_diff);
 
       REC.set("omega_regress", omega_regress);
+      REC.set("omega_regress_ema", omega_regress_ema_);
       REC.set("regress_weight", regress_weight);
     }
   }
