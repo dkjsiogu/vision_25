@@ -411,12 +411,27 @@ void OutpostTarget::init_ekf(const Armor & armor)
   ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);
   ekf_initialized_ = true;
 
-  // 初始化观测 z：只初始化第一帧看到的那一块板
-  // 其他两块板等实际观测到时再初始化，避免三层 z 污染
+  // 初始化观测 z：只初始化第一帧“实际看到的那一块板”。
+  // 不能假设第一帧一定是 plate 0，否则会把 z 写错板，后续弹道必然偏。
+  int best_i = 0;
+  double best_err2 = 1e100;
+  for (int i = 0; i < 3; i++) {
+    const double angle = tools::limit_rad(armor_yaw + i * 2.0 * M_PI / 3.0);
+    const double pred_x = cx - outpost_radius_ * std::cos(angle);
+    const double pred_y = cy - outpost_radius_ * std::sin(angle);
+    const double dx = armor_x - pred_x;
+    const double dy = armor_y - pred_y;
+    const double err2 = dx * dx + dy * dy;
+    if (err2 < best_err2) {
+      best_err2 = err2;
+      best_i = i;
+    }
+  }
+
   plate_z_ = {0.0, 0.0, 0.0};
   plate_z_valid_ = {false, false, false};
-  plate_z_[0] = armor_z;       // 第一帧默认是 plate 0
-  plate_z_valid_[0] = true;
+  plate_z_[best_i] = armor_z;
+  plate_z_valid_[best_i] = true;
   observed_z_ = armor_z;
   observed_z_valid_ = true;
 
@@ -426,11 +441,16 @@ void OutpostTarget::init_ekf(const Armor & armor)
   pitch_history_.push_back(pitch);
 
   // 初始化 plate-id / 相位差分缓存，帮助 omega 更快点火
-  meas_plate_id_ = 0;
+  meas_plate_id_ = best_i;
+  meas_plate_id_for_update_ = best_i;
   meas_valid_ = true;
   last_obs_phase_ = tools::limit_rad(std::atan2(cy - armor_y, cx - armor_x));
   last_obs_time_ = std::chrono::steady_clock::time_point{};  // 由首次 update() 写入
   last_obs_phase_valid_ = false;  // 下一帧开始做差分
+
+  // 前哨站可始终输出 3 板预测，进入 TRACKING 即视为 jumped。
+  jumped = true;
+  last_id = best_i;
 
   omega_est_ = 0.0;
   unwrapped_phase_history_.clear();
@@ -757,16 +777,11 @@ Eigen::Vector4d OutpostTarget::armor_xyza(int i) const
   double armor_y = cy - r * std::sin(angle);
 
   // 高度处理：
-  // - 如果该板已初始化，使用其独立估计的 z
-  // - 如果未初始化，用 observed_z_ + 层高偏移估计（前哨站层高差约 0.1m）
-  double armor_z;
+  // - 只有观测到并初始化过的板才使用其独立 z
+  // - 未初始化的板不做“硬猜偏移”，否则会把错误 z 传到下游弹道，导致必然打不中
+  double armor_z = observed_z_;
   if (i >= 0 && i < 3 && plate_z_valid_[i]) {
     armor_z = plate_z_[i];
-  } else {
-    // 未初始化的板：根据板号给一个预估偏移，让三层视觉上分开
-    // 这是粗略估计，实际高度需要观测到该板后才能确定
-    const double layer_offset = 0.1;  // 前哨站层高差约 0.1m
-    armor_z = observed_z_ + (i - 1) * layer_offset;  // i=0: -0.1, i=1: 0, i=2: +0.1
   }
 
   return {armor_x, armor_y, armor_z, angle};
