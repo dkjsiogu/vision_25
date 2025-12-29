@@ -321,6 +321,8 @@ void OutpostTarget::update_omega_from_observation_xy(
 
     unwrapped_phase_history_.push_back(unwrapped_phase_accum_);
     phase_time_history_.push_back(0.0);
+    omega_regress_ema_ = 0.0;
+    omega_regress_ema_valid_ = false;
     return;
   }
 
@@ -354,6 +356,8 @@ void OutpostTarget::update_omega_from_observation_xy(
 
     unwrapped_phase_history_.push_back(unwrapped_phase_accum_);
     phase_time_history_.push_back(0.0);
+    omega_regress_ema_ = 0.0;
+    omega_regress_ema_valid_ = false;
     return;
   }
 
