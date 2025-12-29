@@ -41,8 +41,15 @@ OutpostTarget::OutpostTarget(const std::string & config_path)
   }
 
   // 可选：omega PLL 参数
-  if (yaml["outpost_omega_max_abs"]) {
-    omega_max_abs_ = yaml["outpost_omega_max_abs"].as<double>();
+  if (yaml["outpost_omega_est_max_abs"]) {
+    omega_est_max_abs_ = yaml["outpost_omega_est_max_abs"].as<double>();
+  } else if (yaml["outpost_omega_max_abs"]) {
+    // 兼容旧配置：单一限幅同时设置两个
+    omega_est_max_abs_ = yaml["outpost_omega_max_abs"].as<double>();
+    omega_regress_max_abs_ = omega_est_max_abs_;
+  }
+  if (yaml["outpost_omega_regress_max_abs"]) {
+    omega_regress_max_abs_ = yaml["outpost_omega_regress_max_abs"].as<double>();
   }
   if (yaml["outpost_pll_Kp"]) {
     pll_Kp_ = yaml["outpost_pll_Kp"].as<double>();
@@ -411,11 +418,14 @@ void OutpostTarget::update_omega_from_observation_xy(
     }
 
     if (den > 1e-9) {
-      double omega_regress = num / den;
+      double omega_regress_raw = num / den;
 
-      // [修复] 对 omega_regress 做限幅，排除不合理极端值
-      // 数据显示有负值和 >10 的极端值，限制在合理范围内
-      omega_regress = std::clamp(omega_regress, -omega_max_abs_, omega_max_abs_);
+      // [改进] 回归限幅：用 omega_regress_max_abs_ 裁掉极端值
+      // 记录是否触顶，用于决定先验权重
+      const bool regress_hit_limit =
+        std::abs(omega_regress_raw) >= omega_regress_max_abs_ * 0.95;
+      double omega_regress =
+        std::clamp(omega_regress_raw, -omega_regress_max_abs_, omega_regress_max_abs_);
 
       // [修复] 对 omega_regress 做 EMA 平滑，减少单次回归噪声
       // 数据显示 omega_regress 变异系数 47%，平滑后降到 ~18%
@@ -430,9 +440,15 @@ void OutpostTarget::update_omega_from_observation_xy(
       // [改进] 更快切换到回归主导，回归更稳定
       const double regress_weight = std::min(1.0, update_count_ / 8.0);
 
-      // [改进] 加入先验约束：omega 向理论速度靠拢（保持当前方向）
-      // 先验权重：稳定期生效（update_count > 10），防止极端值把 omega 拉偏
-      const double prior_weight = (update_count_ > 10) ? 0.1 : 0.0;
+      // [改进] 先验约束：仅在质量差时生效（回归撞限幅/门控边缘）
+      // 质量好时让观测自己决定速度，避免把真实 2.64 拉到 2.51
+      double prior_weight = 0.0;
+      if (update_count_ > 10) {
+        if (regress_hit_limit) {
+          prior_weight = 0.15;  // 回归撞限幅，更信先验
+        }
+        // 可扩展：门控边缘时也可加权（ratio 接近阈值等）
+      }
       // 先验值：大小为理论值，符号跟随当前 omega（方向由观测决定）
       const double omega_prior_signed = (omega_est_ >= 0) ? omega_prior_abs_ : -omega_prior_abs_;
       const double omega_with_prior =
@@ -445,14 +461,17 @@ void OutpostTarget::update_omega_from_observation_xy(
       const double max_diff = omega_fuse_rate * dt_step;
       omega_est_ += std::clamp(omega_diff, -max_diff, max_diff);
 
+      REC.set("omega_regress_raw", omega_regress_raw);
       REC.set("omega_regress", omega_regress);
       REC.set("omega_regress_ema", omega_regress_ema_);
       REC.set("regress_weight", regress_weight);
+      REC.set("prior_weight", prior_weight);
+      REC.set("regress_hit_limit", regress_hit_limit ? 1 : 0);
     }
   }
 
-  // 限幅
-  omega_est_ = std::clamp(omega_est_, -omega_max_abs_, omega_max_abs_);
+  // [改进] 最终限幅：用 omega_est_max_abs_ 给足动态余量
+  omega_est_ = std::clamp(omega_est_, -omega_est_max_abs_, omega_est_max_abs_);
 }
 
 void OutpostTarget::init_ekf(const Armor & armor)
@@ -742,8 +761,11 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     REC.set("jump_gate", 0.0);
     REC.set("jump_triggered", 0);
     REC.set("window_size", 0);
+    REC.set("omega_regress_raw", 0.0);
     REC.set("omega_regress", 0.0);
     REC.set("regress_weight", 0.0);
+    REC.set("prior_weight", 0.0);
+    REC.set("regress_hit_limit", 0);
     REC.commit();
     return true;
   }
