@@ -161,7 +161,8 @@ int main(int argc, char * argv[])
     while (!quit) {
       auto target = target_queue.front();
       auto gs = gimbal.state();
-      auto plan = planner.plan(target, gs.bullet_speed);
+      // [改进] 使用云台实测状态作为 MPC 初值
+      auto plan = planner.plan(target, gs.bullet_speed, gs);
 
       gimbal.send(
         plan.control, plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc, 

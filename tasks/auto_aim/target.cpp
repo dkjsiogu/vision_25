@@ -234,6 +234,31 @@ void Target::update(const Armor & armor)
   update_ypda(armor, id);
 }
 
+// [边跑边打] 带自车速度补偿的更新
+void Target::update(const Armor & armor, const SelfVelocity & self_vel)
+{
+  // 先执行标准更新
+  update(armor);
+
+  // 如果有有效的自车速度，补偿 EKF 中的目标速度
+  // EKF 状态: [cx, vx, cy, vy, z, vz, phase, omega, radius, armor_l, armor_h]
+  // 观测到的速度 = 目标真实速度 - 自车速度
+  // 因此：目标真实速度 = 观测到的速度 + 自车速度
+  if (self_vel.valid) {
+    // 获取当前状态
+    Eigen::VectorXd x = ekf_.x;
+
+    // 补偿速度：将观测误差中的自车运动分量移除
+    // 注意：这里假设 EKF 的速度估计已经被自车运动"污染"
+    // 我们通过加回自车速度来获得目标在世界系中的真实速度
+    x[1] += self_vel.vx;  // vx
+    x[3] += self_vel.vy;  // vy
+    x[5] += self_vel.vz;  // vz
+
+    ekf_.x = x;
+  }
+}
+
 void Target::update_ypda(const Armor & armor, int id)
 {
   //观测jacobi

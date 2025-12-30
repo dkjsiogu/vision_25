@@ -5,6 +5,7 @@
 #include <list>
 #include <optional>
 
+#include "io/gimbal/gimbal.hpp"
 #include "tasks/auto_aim/target.hpp"
 #include "tinympc/tiny_api.hpp"
 
@@ -36,6 +37,11 @@ public:
   Eigen::Vector4d debug_xyza;
   Planner(const std::string & config_path);
 
+  // [改进] 新增接口：使用云台实测状态作为 MPC 初值
+  Plan plan(Target target, double bullet_speed, const io::GimbalState & gs);
+  Plan plan(std::optional<Target> target, double bullet_speed, const io::GimbalState & gs);
+
+  // [兼容] 旧接口：使用参考轨迹起点作为 MPC 初值（开环）
   Plan plan(Target target, double bullet_speed);
   Plan plan(std::optional<Target> target, double bullet_speed);
 

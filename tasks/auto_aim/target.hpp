@@ -15,6 +15,19 @@
 namespace auto_aim
 {
 
+// [边跑边打] 自车速度结构体
+// 用于补偿自身运动对目标观测的影响
+// 当自车移动时，静止目标在相机中会看起来像在移动
+struct SelfVelocity
+{
+  double vx = 0.0;  // 自车在世界系下的 x 方向速度 (m/s)
+  double vy = 0.0;  // 自车在世界系下的 y 方向速度 (m/s)
+  double vz = 0.0;  // 自车在世界系下的 z 方向速度 (m/s)，通常为 0
+  bool valid = false;  // 是否有有效的速度数据
+
+  static SelfVelocity zero() { return {0.0, 0.0, 0.0, true}; }
+};
+
 class Target
 {
 public:
@@ -44,6 +57,10 @@ public:
   void predict(std::chrono::steady_clock::time_point t);
   void predict(double dt);
   void update(const Armor & armor);
+
+  // [边跑边打] 带自车速度补偿的更新
+  // 当有有效的自车速度时，会从观测的目标速度中减去自车速度
+  void update(const Armor & armor, const SelfVelocity & self_vel);
 
   Eigen::VectorXd ekf_x() const;
   const tools::ExtendedKalmanFilter & ekf() const;

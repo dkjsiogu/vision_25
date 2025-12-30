@@ -427,20 +427,30 @@ void OutpostTarget::update_omega_from_observation_xy(
         REC.set("omega_regress_ema", omega_regress_ema_);
         REC.set("regress_weight", 0.0);
         REC.set("prior_weight", 0.0);
+        REC.set("regress_sigma", 0.0);
         REC.set("regress_hit_limit", 1);  // 当作异常帧
         return;
       }
 
+      // [改进] 计算回归不确定度（斜率标准误差）
+      // sigma = sqrt(MSE / Sxx)，其中 MSE = SSE / (n-2)，Sxx = sum((t-t_mean)^2) = den
+      double sse = 0.0;
+      for (size_t i = 0; i < n; i++) {
+        double pred = phi_mean + omega_regress_raw * (phase_time_history_[i] - t_mean);
+        double err = unwrapped_phase_history_[i] - pred;
+        sse += err * err;
+      }
+      const double mse = (n > 2) ? sse / (n - 2) : sse;
+      const double sigma_regress = std::sqrt(mse / den);
+
       // [改进] 回归限幅：用 omega_regress_max_abs_ 裁掉极端值
-      // 记录是否触顶，用于决定先验权重
       const bool regress_hit_limit =
         std::abs(omega_regress_raw) >= omega_regress_max_abs_ * 0.95;
       double omega_regress =
         std::clamp(omega_regress_raw, -omega_regress_max_abs_, omega_regress_max_abs_);
 
       // [修复] 对 omega_regress 做 EMA 平滑，减少单次回归噪声
-      // 数据显示 omega_regress 变异系数 47%，平滑后降到 ~18%
-      const double ema_alpha = 0.3;  // 较快响应，同时平滑
+      const double ema_alpha = 0.3;
       if (!omega_regress_ema_valid_) {
         omega_regress_ema_ = omega_regress;
         omega_regress_ema_valid_ = true;
@@ -448,17 +458,28 @@ void OutpostTarget::update_omega_from_observation_xy(
         omega_regress_ema_ = ema_alpha * omega_regress + (1.0 - ema_alpha) * omega_regress_ema_;
       }
 
-      // [改进] 更快切换到回归主导，回归更稳定
+      // [改进] 更快切换到回归主导
       const double regress_weight = std::min(1.0, update_count_ / 8.0);
 
-      // [改进] 先验约束：仅在质量差时生效（回归撞限幅/门控边缘）
-      // 质量好时让观测自己决定速度，避免把真实 2.64 拉到 2.51
+      // [改进] 贝叶斯风格先验权重：基于回归不确定度连续调整
+      // sigma_regress 大 → 回归不可靠 → 更信先验
+      // sigma_regress 小 → 回归可靠 → 更信观测
       double prior_weight = 0.0;
       if (update_count_ > 10) {
+        // 贝叶斯公式：w_prior = σ_obs² / (σ_obs² + σ_prior²)
+        // σ_prior 设为 0.3 rad/s（先验的不确定度，即我们对 2.51 的信心）
+        const double sigma_prior = 0.3;
+        const double sigma_obs_sq = sigma_regress * sigma_regress;
+        const double sigma_prior_sq = sigma_prior * sigma_prior;
+        prior_weight = sigma_obs_sq / (sigma_obs_sq + sigma_prior_sq);
+
+        // 限幅：最多 30%，避免先验主导
+        prior_weight = std::clamp(prior_weight, 0.0, 0.3);
+
+        // 撞限幅时额外加权
         if (regress_hit_limit) {
-          prior_weight = 0.15;  // 回归撞限幅，更信先验
+          prior_weight = std::max(prior_weight, 0.15);
         }
-        // 可扩展：门控边缘时也可加权（ratio 接近阈值等）
       }
       // 先验值：大小为理论值，符号跟随当前 omega（方向由观测决定）
       const double omega_prior_signed = (omega_est_ >= 0) ? omega_prior_abs_ : -omega_prior_abs_;
@@ -477,6 +498,7 @@ void OutpostTarget::update_omega_from_observation_xy(
       REC.set("omega_regress_ema", omega_regress_ema_);
       REC.set("regress_weight", regress_weight);
       REC.set("prior_weight", prior_weight);
+      REC.set("regress_sigma", sigma_regress);
       REC.set("regress_hit_limit", regress_hit_limit ? 1 : 0);
     }
   }
@@ -776,6 +798,7 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     REC.set("omega_regress", 0.0);
     REC.set("regress_weight", 0.0);
     REC.set("prior_weight", 0.0);
+    REC.set("regress_sigma", 0.0);
     REC.set("regress_hit_limit", 0);
     REC.commit();
     return true;
