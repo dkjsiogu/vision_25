@@ -20,6 +20,13 @@ enum class OutpostState
   TRACKING
 };
 
+// omega 学习状态机
+enum class OmegaLearnState
+{
+  ACQUIRE,  // 点火期：用回归快速收敛
+  LOCKED    // 锁定期：冻结 omega，只做监测
+};
+
 /**
  * 前哨站目标追踪器 (简化版)
  *
@@ -133,6 +140,32 @@ private:
   int omega_sign_count_ = 0;  // 连续同符号计数
   static constexpr int DIRECTION_LOCK_THRESHOLD = 5;  // 连续 5 帧才锁定方向
 
+  // ============================================================================
+  // omega 学习状态机：ACQUIRE → LOCKED
+  // ============================================================================
+  OmegaLearnState omega_learn_state_ = OmegaLearnState::ACQUIRE;
+  double omega_locked_value_ = 0.0;      // 锁定时的 omega 值
+  int omega_lock_frame_count_ = 0;       // 连续满足锁定条件的帧数
+  int omega_unlock_frame_count_ = 0;     // 连续满足解锁条件的帧数
+  static constexpr int OMEGA_LOCK_THRESHOLD = 15;    // 连续 15 帧锁定
+  static constexpr int OMEGA_UNLOCK_THRESHOLD = 5;   // 连续 5 帧解锁
+  double omega_lock_sigma_thr_ = 0.3;    // 锁定条件：regress_sigma < thr
+  double omega_lock_delta_thr_ = 0.2;    // 锁定条件：|omega_est - ema| < thr
+  double last_sigma_regress_ = 999.0;    // 上一帧的回归不确定度
+  bool last_jump_triggered_ = false;     // 上一帧是否触发跳变
+
+  // ============================================================================
+  // z 三层模型：layer_z_ + plate_to_layer_ 映射
+  // ============================================================================
+  std::array<double, 3> layer_z_{{0.0, 0.0, 0.0}};           // 三层中心高度
+  std::array<int, 3> plate_to_layer_{{-1, -1, -1}};          // plate_id → layer 映射 (-1=未知)
+  std::array<std::array<int, 3>, 3> plate_layer_votes_{{}};  // votes[plate][layer]
+  bool layer_initialized_ = false;
+  int layer_total_votes_ = 0;
+  static constexpr int LAYER_INIT_FRAMES = 10;      // 初始化需要的帧数
+  static constexpr int LAYER_LOCK_VOTES = 20;       // 锁定映射需要的票数
+  static constexpr double LAYER_LOCK_RATIO = 0.7;   // 锁定映射需要的占比
+
   // z 估计：单目无法可靠判定"上中下层"，但在 TRACKING 状态下我们能稳定地给出
   // 三块装甲板的角度 id（0/1/2）。因此对每个 id 维护一条 z 估计，并且只在
   // meas_valid_==true 时更新对应 id，避免三层 z 互相污染。
@@ -201,6 +234,12 @@ private:
 
   void align_phase_to_observation_xy(const Armor & armor);
   void update_omega_from_observation_xy(const Armor & armor, std::chrono::steady_clock::time_point t);
+
+  // omega 学习状态机
+  void update_omega_learn_state(double sigma_regress, bool jump_triggered);
+
+  // z 三层模型学习
+  void update_layer_model(double z_obs, int plate_id);
 
   // 计算第 i 个装甲板的位置 (i = 0, 1, 2)
   Eigen::Vector4d armor_xyza(int i) const;

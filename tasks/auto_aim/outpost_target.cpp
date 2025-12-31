@@ -122,6 +122,21 @@ void OutpostTarget::reset()
   omega_direction_ = 0;
   omega_sign_count_ = 0;
 
+  // omega 学习状态机重置
+  omega_learn_state_ = OmegaLearnState::ACQUIRE;
+  omega_locked_value_ = 0.0;
+  omega_lock_frame_count_ = 0;
+  omega_unlock_frame_count_ = 0;
+  last_sigma_regress_ = 999.0;
+  last_jump_triggered_ = false;
+
+  // z 三层模型重置
+  layer_z_ = {0.0, 0.0, 0.0};
+  plate_to_layer_ = {-1, -1, -1};
+  for (auto & row : plate_layer_votes_) row = {0, 0, 0};
+  layer_initialized_ = false;
+  layer_total_votes_ = 0;
+
   phase0_pred_valid_ = false;
   last_pll_time_valid_ = false;
 
@@ -347,6 +362,7 @@ void OutpostTarget::update_omega_from_observation_xy(
   // 1.2 rad ≈ 70度，只有非常大的跳变才触发
   const double jump_gate = (std::abs(omega_est_) < 0.5) ? 2.0 : 1.2;
   const bool jump_triggered = last_obs_phase_valid_ && std::abs(dphase_centered) >= jump_gate;
+  last_jump_triggered_ = jump_triggered;  // 缓存给状态机用
 
   // [日志] 记录滑窗回归相关数据
   REC.set("dphase_centered", dphase_centered);
@@ -447,6 +463,7 @@ void OutpostTarget::update_omega_from_observation_xy(
       }
       const double mse = (n > 2) ? sse / (n - 2) : sse;
       const double sigma_regress = std::sqrt(mse / den);
+      last_sigma_regress_ = sigma_regress;  // 缓存给状态机用
 
       // [改进] 回归限幅：用 omega_regress_max_abs_ 裁掉极端值
       const bool regress_hit_limit =
@@ -843,6 +860,18 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     REC.set("regress_sigma", 0.0);
     REC.set("regress_hit_limit", 0);
     REC.set("omega_direction", 0);
+    // omega 学习状态机的字段
+    REC.set("omega_learn_state", 0);
+    REC.set("omega_locked_value", 0.0);
+    REC.set("omega_lock_frames", 0);
+    // z 三层模型的字段
+    REC.set("layer_z0", 0.0);
+    REC.set("layer_z1", 0.0);
+    REC.set("layer_z2", 0.0);
+    REC.set("plate_to_layer0", -1);
+    REC.set("plate_to_layer1", -1);
+    REC.set("plate_to_layer2", -1);
+    REC.set("layer_initialized", 0);
     REC.commit();
     return true;
   }
@@ -882,6 +911,14 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
 
   // 用几何相位差分辅助 omega 估计（带跳变门控）
   update_omega_from_observation_xy(armor, t);
+
+  // omega 学习状态机更新
+  update_omega_learn_state(last_sigma_regress_, last_jump_triggered_);
+
+  // z 三层模型学习（仅在有效帧）
+  if (meas_valid_) {
+    update_layer_model(obs_z, meas_plate_id_for_update_);
+  }
 
   // [日志] 所有数据收集完毕，提交本帧
   REC.set("omega", omega_est_);
@@ -973,8 +1010,10 @@ void OutpostTarget::predict(double dt)
     x_prior[1] = std::clamp(x_prior[1], -max_vel, max_vel);
     x_prior[3] = std::clamp(x_prior[3], -max_vel, max_vel);
 
-    // phase0 由 omega_est_ 外推
-    x_prior[4] = tools::limit_rad(x_prior[4] + omega_est_ * dt);
+    // phase0 由 omega 外推：锁定时用 omega_locked_value_，否则用 omega_est_
+    const double omega_for_predict =
+      (omega_learn_state_ == OmegaLearnState::LOCKED) ? omega_locked_value_ : omega_est_;
+    x_prior[4] = tools::limit_rad(x_prior[4] + omega_for_predict * dt);
     return x_prior;
   };
 
@@ -1056,6 +1095,156 @@ bool OutpostTarget::convergened() const
 {
   if (!ekf_initialized_) return false;
   return update_count_ > 10;
+}
+
+// ============================================================================
+// omega 学习状态机：ACQUIRE → LOCKED
+// ============================================================================
+void OutpostTarget::update_omega_learn_state(double sigma_regress, bool jump_triggered)
+{
+  // 锁定条件检测
+  bool lock_condition =
+    meas_valid_ &&
+    !jump_triggered &&
+    sigma_regress < omega_lock_sigma_thr_ &&
+    omega_regress_ema_valid_ &&
+    std::abs(omega_est_ - omega_regress_ema_) < omega_lock_delta_thr_;
+
+  // 解锁条件检测
+  bool unlock_condition =
+    jump_triggered ||
+    !meas_valid_ ||
+    sigma_regress > omega_lock_sigma_thr_ * 2.0;
+
+  if (omega_learn_state_ == OmegaLearnState::ACQUIRE) {
+    // 点火期：检测是否可以锁定
+    if (lock_condition) {
+      omega_lock_frame_count_++;
+      if (omega_lock_frame_count_ >= OMEGA_LOCK_THRESHOLD) {
+        // 锁定！
+        omega_learn_state_ = OmegaLearnState::LOCKED;
+        omega_locked_value_ = omega_est_;
+        omega_unlock_frame_count_ = 0;
+        tools::logger()->info(
+          "[Outpost] omega LOCKED: {:.3f} rad/s (after {} frames)",
+          omega_locked_value_, omega_lock_frame_count_);
+      }
+    } else {
+      omega_lock_frame_count_ = 0;
+    }
+  } else {
+    // 锁定期：检测是否需要解锁
+    if (unlock_condition) {
+      omega_unlock_frame_count_++;
+      if (omega_unlock_frame_count_ >= OMEGA_UNLOCK_THRESHOLD) {
+        // 解锁！
+        omega_learn_state_ = OmegaLearnState::ACQUIRE;
+        omega_lock_frame_count_ = 0;
+        tools::logger()->info("[Outpost] omega UNLOCKED (after {} bad frames)", omega_unlock_frame_count_);
+      }
+    } else {
+      omega_unlock_frame_count_ = 0;
+    }
+  }
+
+  // 日志
+  REC.set("omega_learn_state", omega_learn_state_ == OmegaLearnState::LOCKED ? 1 : 0);
+  REC.set("omega_locked_value", omega_locked_value_);
+  REC.set("omega_lock_frames", omega_lock_frame_count_);
+}
+
+// ============================================================================
+// z 三层模型学习
+// ============================================================================
+void OutpostTarget::update_layer_model(double z_obs, int plate_id)
+{
+  if (plate_id < 0 || plate_id >= 3) return;
+
+  // 阶段1：初始化层中心（用前 N 帧的观测）
+  if (!layer_initialized_) {
+    layer_total_votes_++;
+
+    // 简单策略：直接用观测更新对应 plate 的 layer 中心
+    // 初始假设：plate 0 → layer 0, plate 1 → layer 1, plate 2 → layer 2
+    double alpha = 0.3;
+    if (layer_total_votes_ <= 3) {
+      // 前几帧直接赋值
+      layer_z_[plate_id] = z_obs;
+    } else {
+      layer_z_[plate_id] = layer_z_[plate_id] * (1.0 - alpha) + z_obs * alpha;
+    }
+
+    // 累计足够帧数后，对层中心排序
+    if (layer_total_votes_ >= LAYER_INIT_FRAMES) {
+      // 按高度排序：layer 0 = 最高, layer 2 = 最低
+      std::array<std::pair<double, int>, 3> sorted;
+      for (int i = 0; i < 3; i++) sorted[i] = {layer_z_[i], i};
+      std::sort(sorted.begin(), sorted.end(), std::greater<>());
+
+      // 重新映射
+      std::array<double, 3> new_layer_z;
+      for (int i = 0; i < 3; i++) {
+        new_layer_z[i] = sorted[i].first;
+      }
+      layer_z_ = new_layer_z;
+
+      layer_initialized_ = true;
+      tools::logger()->info(
+        "[Outpost] Layer initialized: z = [{:.3f}, {:.3f}, {:.3f}]",
+        layer_z_[0], layer_z_[1], layer_z_[2]);
+    }
+  } else {
+    // 阶段2：最近邻分配 + 更新层中心 + 投票
+
+    // 找最近的层
+    int nearest_layer = 0;
+    double min_dist = std::abs(z_obs - layer_z_[0]);
+    for (int k = 1; k < 3; k++) {
+      double dist = std::abs(z_obs - layer_z_[k]);
+      if (dist < min_dist) {
+        min_dist = dist;
+        nearest_layer = k;
+      }
+    }
+
+    // 更新层中心（慢速 EMA）
+    double alpha = 0.1;
+    layer_z_[nearest_layer] = layer_z_[nearest_layer] * (1.0 - alpha) + z_obs * alpha;
+
+    // 给 plate_id 投票
+    plate_layer_votes_[plate_id][nearest_layer]++;
+
+    // 检查是否可以锁定映射
+    int total_votes_for_plate = 0;
+    int max_votes = 0;
+    int max_layer = -1;
+    for (int k = 0; k < 3; k++) {
+      total_votes_for_plate += plate_layer_votes_[plate_id][k];
+      if (plate_layer_votes_[plate_id][k] > max_votes) {
+        max_votes = plate_layer_votes_[plate_id][k];
+        max_layer = k;
+      }
+    }
+
+    // 锁定条件：票数够多 且 占比够高
+    if (total_votes_for_plate >= LAYER_LOCK_VOTES &&
+        max_votes >= total_votes_for_plate * LAYER_LOCK_RATIO &&
+        plate_to_layer_[plate_id] < 0) {
+      plate_to_layer_[plate_id] = max_layer;
+      tools::logger()->info(
+        "[Outpost] Plate {} -> Layer {} locked (votes: {}/{})",
+        plate_id, max_layer, max_votes, total_votes_for_plate);
+    }
+  }
+
+  // 日志
+  REC.set("layer_z0", layer_z_[0]);
+  REC.set("layer_z1", layer_z_[1]);
+  REC.set("layer_z2", layer_z_[2]);
+  REC.set("plate_to_layer0", plate_to_layer_[0]);
+  REC.set("plate_to_layer1", plate_to_layer_[1]);
+  REC.set("plate_to_layer2", plate_to_layer_[2]);
+  REC.set("layer_initialized", layer_initialized_ ? 1 : 0);
 }
 
 }  // namespace auto_aim
