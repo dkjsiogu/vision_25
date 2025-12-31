@@ -104,7 +104,7 @@ private:
   // [改进] 拆分两种限幅：回归限幅用于裁掉异常值，最终限幅给足动态余量
   double omega_regress_max_abs_ = 3.0;  // 回归输出限幅：裁掉极端值
   double omega_est_max_abs_ = 3.5;      // 最终 omega_est 限幅：留足动态余量
-  double omega_prior_abs_ = 2.51;  // 先验速度大小：0.8π rad/s（方向由观测决定）
+  double omega_prior_abs_ = 2.0;  // 先验速度大小（可通过 YAML 配置，实测约 1.95-2.0）
 
   // PLL 参数：omega += Kp * phase_error
   // [改进] 降低增益，配合变化率限幅使用
@@ -128,7 +128,12 @@ private:
   double omega_regress_ema_ = 0.0;
   bool omega_regress_ema_valid_ = false;
 
-  // z 估计：单目无法可靠判定“上中下层”，但在 TRACKING 状态下我们能稳定地给出
+  // 方向锁定机制：防止噪声导致符号频繁翻转
+  int omega_direction_ = 0;  // 0: 未知, 1: 正向, -1: 反向
+  int omega_sign_count_ = 0;  // 连续同符号计数
+  static constexpr int DIRECTION_LOCK_THRESHOLD = 5;  // 连续 5 帧才锁定方向
+
+  // z 估计：单目无法可靠判定"上中下层"，但在 TRACKING 状态下我们能稳定地给出
   // 三块装甲板的角度 id（0/1/2）。因此对每个 id 维护一条 z 估计，并且只在
   // meas_valid_==true 时更新对应 id，避免三层 z 互相污染。
   std::array<double, 3> plate_z_{{0.0, 0.0, 0.0}};

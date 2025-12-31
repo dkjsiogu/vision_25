@@ -54,6 +54,9 @@ OutpostTarget::OutpostTarget(const std::string & config_path)
   if (yaml["outpost_pll_Kp"]) {
     pll_Kp_ = yaml["outpost_pll_Kp"].as<double>();
   }
+  if (yaml["outpost_omega_prior_abs"]) {
+    omega_prior_abs_ = yaml["outpost_omega_prior_abs"].as<double>();
+  }
 
   // 可选：(x,y) 观测噪声参数
   if (yaml["outpost_sigma_xy_base"]) {
@@ -116,6 +119,8 @@ void OutpostTarget::reset()
   window_base_time_valid_ = false;
   omega_regress_ema_ = 0.0;
   omega_regress_ema_valid_ = false;
+  omega_direction_ = 0;
+  omega_sign_count_ = 0;
 
   phase0_pred_valid_ = false;
   last_pll_time_valid_ = false;
@@ -481,8 +486,44 @@ void OutpostTarget::update_omega_from_observation_xy(
           prior_weight = std::max(prior_weight, 0.15);
         }
       }
-      // 先验值：大小为理论值，符号跟随当前 omega（方向由观测决定）
-      const double omega_prior_signed = (omega_est_ >= 0) ? omega_prior_abs_ : -omega_prior_abs_;
+
+      // [改进] 方向锁定机制：基于 omega_regress_ema 的符号
+      // 不再用 omega_est_（因为它受 prior 影响，会自我强化）
+      const int current_sign = (omega_regress_ema_ >= 0) ? 1 : -1;
+
+      if (omega_direction_ == 0) {
+        // 方向未锁定：累计同符号计数
+        if (current_sign == omega_sign_count_ / std::max(std::abs(omega_sign_count_), 1)) {
+          // 符号一致，继续累计
+        } else if (omega_sign_count_ == 0) {
+          // 首次观测
+        }
+        omega_sign_count_ = (current_sign > 0)
+          ? std::max(1, omega_sign_count_ + 1)
+          : std::min(-1, omega_sign_count_ - 1);
+
+        if (std::abs(omega_sign_count_) >= DIRECTION_LOCK_THRESHOLD) {
+          omega_direction_ = (omega_sign_count_ > 0) ? 1 : -1;
+          tools::logger()->info("[Outpost] Direction locked: {}", omega_direction_ > 0 ? "+" : "-");
+        }
+      } else {
+        // 方向已锁定：检测是否需要翻转
+        if (current_sign != omega_direction_) {
+          omega_sign_count_++;
+          if (omega_sign_count_ >= DIRECTION_LOCK_THRESHOLD * 2) {
+            // 需要连续更多帧才能翻转（抵抗噪声）
+            omega_direction_ = current_sign;
+            omega_sign_count_ = 0;
+            tools::logger()->info("[Outpost] Direction flipped: {}", omega_direction_ > 0 ? "+" : "-");
+          }
+        } else {
+          omega_sign_count_ = 0;  // 重置翻转计数
+        }
+      }
+
+      // 先验值：使用锁定方向（如果已锁定），否则用回归方向
+      const int prior_sign = (omega_direction_ != 0) ? omega_direction_ : current_sign;
+      const double omega_prior_signed = prior_sign * omega_prior_abs_;
       const double omega_with_prior =
         (1.0 - prior_weight) * omega_regress_ema_ + prior_weight * omega_prior_signed;
 
@@ -500,6 +541,7 @@ void OutpostTarget::update_omega_from_observation_xy(
       REC.set("prior_weight", prior_weight);
       REC.set("regress_sigma", sigma_regress);
       REC.set("regress_hit_limit", regress_hit_limit ? 1 : 0);
+      REC.set("omega_direction", omega_direction_);
     }
   }
 
@@ -800,6 +842,7 @@ bool OutpostTarget::update(const Armor & armor, std::chrono::steady_clock::time_
     REC.set("prior_weight", 0.0);
     REC.set("regress_sigma", 0.0);
     REC.set("regress_hit_limit", 0);
+    REC.set("omega_direction", 0);
     REC.commit();
     return true;
   }
