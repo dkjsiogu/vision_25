@@ -162,7 +162,9 @@ private:
   std::array<std::array<int, 3>, 3> plate_layer_votes_{{}};  // votes[plate][layer]
   bool layer_initialized_ = false;
   int layer_total_votes_ = 0;
+  std::deque<double> layer_init_z_samples_;  // 初始化阶段采样缓存
   static constexpr int LAYER_INIT_FRAMES = 10;      // 初始化需要的帧数
+  static constexpr double LAYER_INIT_MIN_RANGE = 0.08;  // m：最小高度跨度，否则不认为已形成三层
   static constexpr int LAYER_LOCK_VOTES = 20;       // 锁定映射需要的票数
   static constexpr double LAYER_LOCK_RATIO = 0.7;   // 锁定映射需要的占比
 

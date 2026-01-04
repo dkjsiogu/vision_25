@@ -136,6 +136,7 @@ void OutpostTarget::reset()
   for (auto & row : plate_layer_votes_) row = {0, 0, 0};
   layer_initialized_ = false;
   layer_total_votes_ = 0;
+  layer_init_z_samples_.clear();
 
   phase0_pred_valid_ = false;
   last_pll_time_valid_ = false;
@@ -282,6 +283,8 @@ void OutpostTarget::update_omega_from_observation_xy(
   if (!meas_valid_) return;
   if (!phase0_pred_valid_) return;
 
+  const bool omega_locked = (omega_learn_state_ == OmegaLearnState::LOCKED);
+
   const double cx = ekf_.x[0], cy = ekf_.x[2];
   const double obs_x = armor.xyz_in_world[0];
   const double obs_y = armor.xyz_in_world[1];
@@ -324,7 +327,9 @@ void OutpostTarget::update_omega_from_observation_xy(
     // 启动期允许更快变化（5 rad/s²），稳定期严格（2 rad/s²）
     const double max_rate = (update_count_ < 15) ? 5.0 : 2.0;
     const double max_delta = max_rate * dt_pll;
-    omega_est_ += std::clamp(delta_omega, -max_delta, max_delta);
+    if (!omega_locked) {
+      omega_est_ += std::clamp(delta_omega, -max_delta, max_delta);
+    }
   }
 
   // ========== 滑窗回归部分：用展开相位序列拟合 omega ==========
@@ -354,13 +359,14 @@ void OutpostTarget::update_omega_from_observation_xy(
   }
 
   // 预测增量：基于当前 omega 估计
-  const double pred_dphase = omega_est_ * dt_step;
+  const double omega_for_residual = omega_locked ? omega_locked_value_ : omega_est_;
+  const double pred_dphase = omega_for_residual * dt_step;
   // 去中心化的相位差（观测残差）
   const double dphase_centered = tools::limit_rad(obs_phase0 - last_obs_phase_ - pred_dphase);
 
   // [改进] 动态门限：更宽容，减少误触发导致的回归窗口清空
   // 1.2 rad ≈ 70度，只有非常大的跳变才触发
-  const double jump_gate = (std::abs(omega_est_) < 0.5) ? 2.0 : 1.2;
+  const double jump_gate = (std::abs(omega_for_residual) < 0.5) ? 2.0 : 1.2;
   const bool jump_triggered = last_obs_phase_valid_ && std::abs(dphase_centered) >= jump_gate;
   last_jump_triggered_ = jump_triggered;  // 缓存给状态机用
 
@@ -545,11 +551,14 @@ void OutpostTarget::update_omega_from_observation_xy(
         (1.0 - prior_weight) * omega_regress_ema_ + prior_weight * omega_prior_signed;
 
       // [修复] 使用带先验的 omega 进行融合
-      const double omega_fused = (1.0 - regress_weight) * omega_est_ + regress_weight * omega_with_prior;
-      const double omega_diff = omega_fused - omega_est_;
-      const double omega_fuse_rate = 15.0;  // 提高到 15 rad/s²，加快收敛
-      const double max_diff = omega_fuse_rate * dt_step;
-      omega_est_ += std::clamp(omega_diff, -max_diff, max_diff);
+      if (!omega_locked) {
+        const double omega_fused =
+          (1.0 - regress_weight) * omega_est_ + regress_weight * omega_with_prior;
+        const double omega_diff = omega_fused - omega_est_;
+        const double omega_fuse_rate = 15.0;  // 提高到 15 rad/s²，加快收敛
+        const double max_diff = omega_fuse_rate * dt_step;
+        omega_est_ += std::clamp(omega_diff, -max_diff, max_diff);
+      }
 
       REC.set("omega_regress_raw", omega_regress_raw);
       REC.set("omega_regress", omega_regress);
@@ -564,6 +573,10 @@ void OutpostTarget::update_omega_from_observation_xy(
 
   // [改进] 最终限幅：用 omega_est_max_abs_ 给足动态余量
   omega_est_ = std::clamp(omega_est_, -omega_est_max_abs_, omega_est_max_abs_);
+  if (omega_locked) {
+    // 锁定期：预测与输出应严格使用锁定值
+    omega_est_ = omega_locked_value_;
+  }
 }
 
 void OutpostTarget::init_ekf(const Armor & armor)
@@ -951,6 +964,10 @@ void OutpostTarget::predict(std::chrono::steady_clock::time_point t)
   // 丢失一段时间后，omega 逐渐衰减
   if (temp_lost_count_ > 5) {
     omega_est_ *= 0.92;
+    if (omega_learn_state_ == OmegaLearnState::LOCKED) {
+      omega_locked_value_ *= 0.92;
+      omega_est_ = omega_locked_value_;
+    }
   }
 
   if (temp_lost_count_ > max_temp_lost_count_) {
@@ -1079,9 +1096,11 @@ Eigen::VectorXd OutpostTarget::ekf_x() const
 
   // 5维状态: [cx, vx, cy, vy, phase0]
   // 转换为11维: [cx, vx, cy, vy, z, vz, phase, omega, radius, l, h]
+  const double omega_out =
+    (omega_learn_state_ == OmegaLearnState::LOCKED) ? omega_locked_value_ : omega_est_;
   x << ekf_.x[0], ekf_.x[1], ekf_.x[2], ekf_.x[3],
     observed_z_, 0,  // z 用观测值，vz = 0
-    ekf_.x[4], omega_est_, outpost_radius_, 0, 0;
+    ekf_.x[4], omega_out, outpost_radius_, 0, 0;
   return x;
 }
 
@@ -1092,7 +1111,9 @@ bool OutpostTarget::diverged() const
   // radius 现在是常量，不再需要检查
 
   // 检查 omega 是否发散
-  double omega = std::abs(omega_est_);
+  const double omega_used =
+    (omega_learn_state_ == OmegaLearnState::LOCKED) ? omega_locked_value_ : omega_est_;
+  double omega = std::abs(omega_used);
   if (omega > 5.0) return true;
 
   return false;
@@ -1131,6 +1152,7 @@ void OutpostTarget::update_omega_learn_state(double sigma_regress, bool jump_tri
         // 锁定！
         omega_learn_state_ = OmegaLearnState::LOCKED;
         omega_locked_value_ = omega_est_;
+        omega_est_ = omega_locked_value_;
         omega_unlock_frame_count_ = 0;
         tools::logger()->info(
           "[Outpost] omega LOCKED: {:.3f} rad/s (after {} frames)",
@@ -1169,39 +1191,55 @@ void OutpostTarget::update_layer_model(double z_obs, int plate_id)
 
   // 阶段1：初始化层中心（用前 N 帧的观测）
   if (!layer_initialized_) {
-    layer_total_votes_++;
-
-    // 简单策略：直接用观测更新对应 plate 的 layer 中心
-    // 初始假设：plate 0 → layer 0, plate 1 → layer 1, plate 2 → layer 2
-    double alpha = 0.3;
-    if (layer_total_votes_ <= 3) {
-      // 前几帧直接赋值
-      layer_z_[plate_id] = z_obs;
-    } else {
-      layer_z_[plate_id] = layer_z_[plate_id] * (1.0 - alpha) + z_obs * alpha;
+    // 用观测样本初始化：避免只观测到单一高度也强行初始化
+    layer_init_z_samples_.push_back(z_obs);
+    while (layer_init_z_samples_.size() > 60) {
+      layer_init_z_samples_.pop_front();
     }
+    layer_total_votes_ = static_cast<int>(layer_init_z_samples_.size());
 
-    // 累计足够帧数后，对层中心排序
-    if (layer_total_votes_ >= LAYER_INIT_FRAMES) {
-      // 按高度排序：layer 0 = 最高, layer 2 = 最低
-      std::array<std::pair<double, int>, 3> sorted;
-      for (int i = 0; i < 3; i++) sorted[i] = {layer_z_[i], i};
-      std::sort(sorted.begin(), sorted.end(), std::greater<>());
-
-      // 重新映射
-      std::array<double, 3> new_layer_z;
-      for (int i = 0; i < 3; i++) {
-        new_layer_z[i] = sorted[i].first;
+    if (layer_init_z_samples_.size() >= static_cast<size_t>(LAYER_INIT_FRAMES)) {
+      double z_min = layer_init_z_samples_.front();
+      double z_max = layer_init_z_samples_.front();
+      for (double z : layer_init_z_samples_) {
+        z_min = std::min(z_min, z);
+        z_max = std::max(z_max, z);
       }
-      layer_z_ = new_layer_z;
 
-      layer_initialized_ = true;
-      tools::logger()->info(
-        "[Outpost] Layer initialized: z = [{:.3f}, {:.3f}, {:.3f}]",
-        layer_z_[0], layer_z_[1], layer_z_[2]);
+      // 如果高度跨度太小，说明目前只在同一层附近抖动，不初始化三层
+      if ((z_max - z_min) >= LAYER_INIT_MIN_RANGE) {
+        std::vector<double> z_sorted(layer_init_z_samples_.begin(), layer_init_z_samples_.end());
+        std::sort(z_sorted.begin(), z_sorted.end());
+        const size_t n = z_sorted.size();
+
+        // 约定：layer 0 = 最高, layer 1 = 中层, layer 2 = 最低
+        layer_z_[2] = z_sorted.front();
+        layer_z_[1] = z_sorted[n / 2];
+        layer_z_[0] = z_sorted.back();
+
+        layer_initialized_ = true;
+        tools::logger()->info(
+          "[Outpost] Layer initialized: z = [{:.3f}, {:.3f}, {:.3f}] (range={:.3f}m, n={})",
+          layer_z_[0], layer_z_[1], layer_z_[2], (z_max - z_min), n);
+      }
     }
   } else {
     // 阶段2：最近邻分配 + 更新层中心 + 投票
+
+    auto swap_layer = [&](int a, int b) {
+      if (a == b) return;
+      std::swap(layer_z_[a], layer_z_[b]);
+      for (int p = 0; p < 3; p++) {
+        std::swap(plate_layer_votes_[p][a], plate_layer_votes_[p][b]);
+      }
+      for (int p = 0; p < 3; p++) {
+        if (plate_to_layer_[p] == a) {
+          plate_to_layer_[p] = b;
+        } else if (plate_to_layer_[p] == b) {
+          plate_to_layer_[p] = a;
+        }
+      }
+    };
 
     // 找最近的层
     int nearest_layer = 0;
@@ -1217,6 +1255,11 @@ void OutpostTarget::update_layer_model(double z_obs, int plate_id)
     // 更新层中心（慢速 EMA）
     double alpha = 0.1;
     layer_z_[nearest_layer] = layer_z_[nearest_layer] * (1.0 - alpha) + z_obs * alpha;
+
+    // 维持层次顺序（layer 0 最高 → layer 2 最低），并同步交换 votes/mapping
+    if (layer_z_[0] < layer_z_[1]) swap_layer(0, 1);
+    if (layer_z_[1] < layer_z_[2]) swap_layer(1, 2);
+    if (layer_z_[0] < layer_z_[1]) swap_layer(0, 1);
 
     // 给 plate_id 投票
     plate_layer_votes_[plate_id][nearest_layer]++;
