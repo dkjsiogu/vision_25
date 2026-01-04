@@ -1034,12 +1034,19 @@ Eigen::Vector4d OutpostTarget::armor_xyza(int i) const
   double armor_x = cx - r * std::cos(angle);
   double armor_y = cy - r * std::sin(angle);
 
-  // 高度处理：
-  // - 只有观测到并初始化过的板才使用其独立 z
-  // - 未初始化的板不做“硬猜偏移”，否则会把错误 z 传到下游弹道，导致必然打不中
+  // 高度处理（优先级从高到低）：
+  // 1. 层模型已初始化 且 该板映射已锁定 → 用 layer_z_[mapping]
+  // 2. 该板有独立观测 → 用 plate_z_[i]
+  // 3. fallback → 用 observed_z_
   double armor_z = observed_z_;
-  if (i >= 0 && i < 3 && plate_z_valid_[i]) {
-    armor_z = plate_z_[i];
+  if (i >= 0 && i < 3) {
+    if (layer_initialized_ && plate_to_layer_[i] >= 0) {
+      // 层模型预测
+      armor_z = layer_z_[plate_to_layer_[i]];
+    } else if (plate_z_valid_[i]) {
+      // 独立观测
+      armor_z = plate_z_[i];
+    }
   }
 
   return {armor_x, armor_y, armor_z, angle};
