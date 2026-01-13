@@ -60,6 +60,10 @@ int main(int argc, char * argv[])
   std::chrono::steady_clock::time_point timestamp;
   io::Command last_command;
 
+  io::Command last_sent_cmd{false, false, 0, 0};
+  bool has_last_sent_cmd = false;
+  bool last_control = false;
+
   while (!exiter.exit()) {
     camera.read(img, timestamp);
     Eigen::Quaterniond q = cboard.imu_at(timestamp - 1ms);
@@ -93,7 +97,21 @@ int main(int argc, char * argv[])
     /// 发射逻辑
     command.shoot = shooter.shoot(command, aimer, targets, gimbal_pos);
 
-    cboard.send(command);
+    if (command.control) {
+      cboard.send(command);
+      last_sent_cmd = command;
+      has_last_sent_cmd = true;
+      last_control = true;
+    } else {
+      // 避免 control=false 时下位机仍读取 yaw/pitch 导致跳转到 0。
+      if (last_control && has_last_sent_cmd) {
+        command.shoot = false;
+        command.yaw = last_sent_cmd.yaw;
+        command.pitch = last_sent_cmd.pitch;
+        cboard.send(command);
+      }
+      last_control = false;
+    }
 
     /// ROS2通信
     Eigen::Vector4d target_info = decider.get_target_info(armors, targets);

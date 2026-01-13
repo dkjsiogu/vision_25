@@ -10,17 +10,14 @@ namespace multithread
 CommandGener::CommandGener(
   auto_aim::Shooter & shooter, auto_aim::Aimer & aimer, io::CBoard & cboard,
   tools::Plotter & plotter, bool debug)
-: shooter_(shooter), aimer_(aimer), cboard_(cboard), plotter_(plotter), stop_(false), debug_(debug)
+: shooter_(shooter), aimer_(aimer), cboard_(cboard), plotter_(plotter), debug_(debug)
 {
   thread_ = std::thread(&CommandGener::generate_command, this);
 }
 
 CommandGener::~CommandGener()
 {
-  {
-    std::lock_guard<std::mutex> lock(mtx_);
-    stop_ = true;
-  }
+  stop_.store(true, std::memory_order_release);
   cv_.notify_all();
   if (thread_.joinable()) thread_.join();
 }
@@ -29,8 +26,10 @@ void CommandGener::push(
   const std::list<auto_aim::Target> & targets, const std::chrono::steady_clock::time_point & t,
   double bullet_speed, const Eigen::Vector3d & gimbal_pos)
 {
-  std::lock_guard<std::mutex> lock(mtx_);
-  latest_ = {targets, t, bullet_speed, gimbal_pos};
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    latest_ = {targets, t, bullet_speed, gimbal_pos};
+  }
   cv_.notify_one();
 }
 
@@ -42,14 +41,21 @@ void CommandGener::generate_command()
   bool has_last_sent_cmd = false;
   bool last_control = false;
 
-  while (!stop_) {
+  while (!stop_.load(std::memory_order_acquire)) {
     std::optional<Input> input;
     {
-      std::lock_guard<std::mutex> lock(mtx_);
+      std::unique_lock<std::mutex> lock(mtx_);
+      cv_.wait_for(lock, std::chrono::milliseconds(10), [&] {
+        return stop_.load(std::memory_order_acquire) || latest_.has_value();
+      });
+
+      if (stop_.load(std::memory_order_acquire)) return;
+
       if (latest_ && tools::delta_time(std::chrono::steady_clock::now(), latest_->t) < 0.2) {
         input = latest_;
-      } else
+      } else {
         input = std::nullopt;
+      }
     }
     if (input) {
       auto command = aimer_.aim(input->targets_, input->t, input->bullet_speed);
@@ -86,7 +92,6 @@ void CommandGener::generate_command()
         plotter_.plot(data);
       }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));  //approximately 500Hz
   }
 }
 

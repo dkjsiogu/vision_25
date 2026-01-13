@@ -52,6 +52,10 @@ int main(int argc, char * argv[])
   Eigen::Quaterniond q;
   std::chrono::steady_clock::time_point t;
 
+  io::Command last_sent_cmd{false, false, 0, 0};
+  bool has_last_sent_cmd = false;
+  bool last_control = false;
+
   while (!exiter.exit()) {
     camera.read(img, t);
     q = cboard.imu_at(t);
@@ -71,7 +75,20 @@ int main(int argc, char * argv[])
 
     auto command = aimer.aim(target_copy, t, cboard.bullet_speed, true);
 
-    cboard.send(command);
+    if (command.control) {
+      cboard.send(command);
+      last_sent_cmd = command;
+      has_last_sent_cmd = true;
+      last_control = true;
+    } else {
+      if (last_control && has_last_sent_cmd) {
+        command.shoot = false;
+        command.yaw = last_sent_cmd.yaw;
+        command.pitch = last_sent_cmd.pitch;
+        cboard.send(command);
+      }
+      last_control = false;
+    }
 
     // -------------- 调试输出 --------------
 

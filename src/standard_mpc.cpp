@@ -62,6 +62,10 @@ int main(int argc, char * argv[])
   Eigen::Quaterniond q;
   std::chrono::steady_clock::time_point t;
 
+  io::Command last_sent_cmd{false, false, 0, 0};
+  bool has_last_sent_cmd = false;
+  bool last_control = false;
+
   std::atomic<bool> quit = false;
 
   std::atomic<io::GimbalMode> mode{io::GimbalMode::IDLE};
@@ -130,12 +134,28 @@ int main(int argc, char * argv[])
         auto target_copy = buff_big_target;
         buff_plan = buff_aimer.mpc_aim(target_copy, t, gs, true);
       }
-      gimbal.send(
-        buff_plan.control, buff_plan.fire, buff_plan.yaw, buff_plan.yaw_vel, buff_plan.yaw_acc,
-        buff_plan.pitch, buff_plan.pitch_vel, buff_plan.pitch_acc);
+      if (buff_plan.control) {
+        gimbal.send(
+          buff_plan.control, buff_plan.fire, buff_plan.yaw, buff_plan.yaw_vel, buff_plan.yaw_acc,
+          buff_plan.pitch, buff_plan.pitch_vel, buff_plan.pitch_acc);
+        last_sent_cmd = io::Command{buff_plan.control, buff_plan.fire, buff_plan.yaw, buff_plan.pitch};
+        has_last_sent_cmd = true;
+        last_control = true;
+      } else {
+        // 避免下位机仍读取 yaw/pitch 导致跳转到 0。
+        if (last_control && has_last_sent_cmd) {
+          gimbal.send(false, false, last_sent_cmd.yaw, 0, 0, last_sent_cmd.pitch, 0, 0);
+        }
+        last_control = false;
+      }
 
-    } else
-      gimbal.send(false, false, 0, 0, 0, 0, 0, 0);
+    } else {
+      // Idle/待命模式：发送零指令
+      if (last_control) {
+        gimbal.send(false, false, 0, 0, 0, 0, 0, 0);
+        last_control = false;
+      }
+    }
   }
 
   quit = true;

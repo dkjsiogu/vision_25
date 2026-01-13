@@ -126,7 +126,22 @@ int main(int argc, char * argv[])
         auto target_copy = buff_big_target;
         buff_command = buff_aimer.aim(target_copy, t, cboard.bullet_speed, true);
       }
-      cboard.send(buff_command);
+
+      if (buff_command.control) {
+        cboard.send(buff_command);
+        last_sent_cmd = buff_command;
+        has_last_sent_cmd = true;
+        last_control = true;
+      } else {
+        // 避免 control=false 时下位机仍读取 yaw/pitch 导致跳转到 0。
+        if (last_control && has_last_sent_cmd) {
+          buff_command.shoot = false;
+          buff_command.yaw = last_sent_cmd.yaw;
+          buff_command.pitch = last_sent_cmd.pitch;
+          cboard.send(buff_command);
+        }
+        last_control = false;
+      }
     }
 
     else
