@@ -8,6 +8,18 @@
 
 namespace auto_aim
 {
+// YOLOv5 输出标签的映射方案。
+// legacy: 旧模型(常见)的颜色/类别定义
+// schema_0526: 0526 新模型（红蓝灰紫 + G/1-5/O/Bs/Bb）
+enum class YoloV5LabelSchema
+{
+  legacy = 0,
+  schema_0526 = 1,
+};
+
+void set_yolov5_label_schema(YoloV5LabelSchema schema);
+YoloV5LabelSchema get_yolov5_label_schema();
+
 enum Color
 {
   red,

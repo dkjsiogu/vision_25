@@ -15,6 +15,19 @@ YOLOV5::YOLOV5(const std::string & config_path, bool debug)
 {
   auto yaml = YAML::LoadFile(config_path);
 
+  // YOLOv5 标签映射方案（默认 legacy）。
+  // legacy: 旧模型(0=蓝/1=红, 0=sentry,1-5,6=outpost,7=base)
+  // 0526: 新模型(红蓝灰紫 + G/1-5/O/Bs/Bb)
+  if (yaml["yolov5_label_schema"]) {
+    auto schema = yaml["yolov5_label_schema"].as<std::string>();
+    if (schema == "0526" || schema == "schema_0526") {
+      label_schema_ = YoloV5LabelSchema::schema_0526;
+    } else {
+      label_schema_ = YoloV5LabelSchema::legacy;
+    }
+  }
+  set_yolov5_label_schema(label_schema_);
+
   model_path_ = yaml["yolov5_model_path"].as<std::string>();
   device_ = yaml["device"].as<std::string>();
   binary_threshold_ = yaml["threshold"].as<double>();
@@ -205,10 +218,20 @@ bool YOLOV5::check_name(const Armor & armor) const
 
 bool YOLOV5::check_type(const Armor & armor) const
 {
-  auto name_ok = (armor.type == ArmorType::small)
-                   ? (armor.name != ArmorName::one && armor.name != ArmorName::base)
-                   : (armor.name != ArmorName::two && armor.name != ArmorName::sentry &&
-                      armor.name != ArmorName::outpost);
+  bool name_ok = true;
+  if (label_schema_ == YoloV5LabelSchema::schema_0526) {
+    // 新模型(0526)：支持 Bs/Bb，因此 base 可以是 small 或 big；英雄只有大装甲。
+    name_ok = (armor.type == ArmorType::small)
+                ? (armor.name != ArmorName::one)
+                : (armor.name != ArmorName::two && armor.name != ArmorName::sentry &&
+                   armor.name != ArmorName::outpost);
+  } else {
+    // legacy：保持原限制（英雄、基地为大装甲，工程/哨兵/前哨站为小装甲）。
+    name_ok = (armor.type == ArmorType::small)
+                ? (armor.name != ArmorName::one && armor.name != ArmorName::base)
+                : (armor.name != ArmorName::two && armor.name != ArmorName::sentry &&
+                   armor.name != ArmorName::outpost);
+  }
 
   // 保存异常的图案，用于神经网络的迭代
   // if (!name_ok) save(armor);

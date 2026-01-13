@@ -28,6 +28,8 @@ private:
   std::string save_path_, debug_path_;
   bool debug_, use_roi_, use_traditional_;
 
+  YoloV5LabelSchema label_schema_ = YoloV5LabelSchema::legacy;
+
   const int class_num_ = 13;
   const float nms_threshold_ = 0.3;
   const float score_threshold_ = 0.7;

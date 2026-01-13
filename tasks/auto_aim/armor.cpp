@@ -1,11 +1,28 @@
 #include "armor.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <opencv2/opencv.hpp>
 
 namespace auto_aim
 {
+namespace
+{
+std::atomic<int> g_yolov5_label_schema{static_cast<int>(YoloV5LabelSchema::legacy)};
+}  // namespace
+
+void set_yolov5_label_schema(YoloV5LabelSchema schema)
+{
+  g_yolov5_label_schema.store(static_cast<int>(schema), std::memory_order_release);
+}
+
+YoloV5LabelSchema get_yolov5_label_schema()
+{
+  return static_cast<YoloV5LabelSchema>(
+    g_yolov5_label_schema.load(std::memory_order_acquire));
+}
+
 Lightbar::Lightbar(const cv::RotatedRect & rotated_rect, std::size_t id)
 : id(id), rotated_rect(rotated_rect)
 {
@@ -172,11 +189,29 @@ Armor::Armor(
   rectangular_error = std::max(left_rectangular_error, right_rectangular_error);
 
   ratio = max_length / max_width;
-  color = color_id == 0 ? Color::blue : color_id == 1 ? Color::red : Color::extinguish;
-  name = num_id == 0  ? ArmorName::sentry
-         : num_id > 5 ? ArmorName(num_id)
-                      : ArmorName(num_id - 1);  //TODO 考虑Bb
-  type = num_id == 1 ? ArmorType::big : ArmorType::small;
+
+  if (get_yolov5_label_schema() == YoloV5LabelSchema::schema_0526) {
+    // 新模型(0526)颜色顺序: 红蓝灰紫 (0=红, 1=蓝, 2=灰, 3=紫)
+    color = color_id == 0 ? Color::red
+            : color_id == 1 ? Color::blue
+            : color_id == 3 ? Color::purple
+                           : Color::extinguish;
+
+    // 新模型(0526)类别顺序: G(0), 1-5(1-5), O(6), Bs(7), Bb(8)
+    name = num_id == 0    ? ArmorName::sentry
+           : num_id >= 7  ? ArmorName::base  // Bs(7) 和 Bb(8) 都映射到 base
+           : num_id == 6  ? ArmorName::outpost
+                          : ArmorName(num_id - 1);  // 1-5 映射到 one-five
+    // 英雄(1)和基地大(8)是大装甲
+    type = (num_id == 1 || num_id == 8) ? ArmorType::big : ArmorType::small;
+  } else {
+    // legacy：旧模型(常见)颜色顺序（0=蓝,1=红） + 类别顺序(0=sentry, 1-5, 6=outpost, 7=base)
+    color = color_id == 0 ? Color::blue : color_id == 1 ? Color::red : Color::extinguish;
+    name = num_id == 0  ? ArmorName::sentry
+           : num_id > 5 ? ArmorName(num_id)
+                        : ArmorName(num_id - 1);
+    type = num_id == 1 ? ArmorType::big : ArmorType::small;
+  }
 }
 
 // YOLOV5+ROI构造函数
@@ -213,9 +248,25 @@ Armor::Armor(
   rectangular_error = std::max(left_rectangular_error, right_rectangular_error);
 
   ratio = max_length / max_width;
-  color = color_id == 0 ? Color::blue : color_id == 1 ? Color::red : Color::extinguish;
-  name = num_id == 0 ? ArmorName::sentry : num_id > 5 ? ArmorName(num_id) : ArmorName(num_id - 1);
-  type = num_id == 1 ? ArmorType::big : ArmorType::small;
+
+  if (get_yolov5_label_schema() == YoloV5LabelSchema::schema_0526) {
+    // 新模型(0526)颜色顺序: 红蓝灰紫 (0=红, 1=蓝, 2=灰, 3=紫)
+    color = color_id == 0 ? Color::red
+            : color_id == 1 ? Color::blue
+            : color_id == 3 ? Color::purple
+                           : Color::extinguish;
+
+    // 新模型(0526)类别顺序: G(0), 1-5(1-5), O(6), Bs(7), Bb(8)
+    name = num_id == 0    ? ArmorName::sentry
+           : num_id >= 7  ? ArmorName::base
+           : num_id == 6  ? ArmorName::outpost
+                          : ArmorName(num_id - 1);
+    type = (num_id == 1 || num_id == 8) ? ArmorType::big : ArmorType::small;
+  } else {
+    color = color_id == 0 ? Color::blue : color_id == 1 ? Color::red : Color::extinguish;
+    name = num_id == 0 ? ArmorName::sentry : num_id > 5 ? ArmorName(num_id) : ArmorName(num_id - 1);
+    type = num_id == 1 ? ArmorType::big : ArmorType::small;
+  }
 }
 
 }  // namespace auto_aim
