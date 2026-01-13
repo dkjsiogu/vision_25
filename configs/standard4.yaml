@@ -7,6 +7,7 @@ classify_model: assets/tiny_resnet.onnx
 yolo11_model_path: assets/yolo11.xml
 yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5_0526.xml
+yolov5_label_schema: "0526"
 device: CPU
 min_confidence: 0.8
 use_traditional: true
@@ -30,12 +31,36 @@ min_armor_ratio: 1
 max_armor_ratio: 5
 max_side_ratio: 1.5
 max_rectangular_error: 25 # degree
-min_confidence: 0.8
 
 #####-----tracker参数-----#####
 min_detect_count: 5
 max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
+
+# ===== 前哨站(outpost)追踪参数（显式写出，便于调参；默认值与代码一致） =====
+outpost_radius: 0.2765
+
+# pitch 稳定性与 z 更新
+pitch_stable_threshold: 0.05
+pitch_unstable_r_scale: 25.0
+observed_z_alpha_stable: 0.7
+observed_z_alpha_unstable: 0.2
+
+# omega 估计（PLL + 滑窗回归）
+outpost_omega_est_max_abs: 3.5
+outpost_omega_regress_max_abs: 3.0
+outpost_pll_Kp: 4.0
+outpost_omega_prior_abs: 2.0
+
+# (x,y) 观测噪声：sigma_xy = clamp(base + k * dist, min, max)
+outpost_sigma_xy_base: 0.05
+outpost_sigma_xy_k: 0.01
+outpost_sigma_xy_min: 0.03
+outpost_sigma_xy_max: 0.15
+
+# (x,y) 残差门控
+outpost_xy_residual_gate_m: 0.40
+outpost_xy_residual_ratio_gate: 0.8
 
 #####-----aimer参数-----#####
 yaw_offset: -2 # degree -2.5

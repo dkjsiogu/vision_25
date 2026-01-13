@@ -30,7 +30,6 @@ min_armor_ratio: 1
 max_armor_ratio: 5
 max_side_ratio: 1.5
 max_rectangular_error: 25 # degree
-min_confidence: 0.8
 
 #####-----tracker参数-----#####
 min_detect_count: 5
