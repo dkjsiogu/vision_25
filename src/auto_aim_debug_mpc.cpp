@@ -74,11 +74,28 @@ int main(int argc, char * argv[])
   target_queue.push(std::nullopt);
 
   std::atomic<bool> quit = false;
+  std::atomic<double> shared_fps{0.0};  // 共享 FPS 变量
+
   auto plan_thread = std::thread([&]() {
     auto t0 = std::chrono::steady_clock::now();
     uint16_t last_bullet_count = 0;
+    double plan_fps = 0.0;
+    int plan_count = 0;
+    auto plan_fps_start = std::chrono::steady_clock::now();
 
     while (!quit) {
+      auto plan_loop_start = std::chrono::steady_clock::now();
+
+      // 计算规划器频率
+      plan_count++;
+      auto plan_fps_elapsed =
+        std::chrono::duration<double>(plan_loop_start - plan_fps_start).count();
+      if (plan_fps_elapsed >= 1.0) {
+        plan_fps = plan_count / plan_fps_elapsed;
+        plan_count = 0;
+        plan_fps_start = plan_loop_start;
+      }
+
       auto target = target_queue.front();
       auto gs = gimbal.state();
       // [改进] 使用云台实测状态作为 MPC 初值
@@ -90,6 +107,12 @@ int main(int argc, char * argv[])
 
       auto fired = gs.bullet_count > last_bullet_count;
       last_bullet_count = gs.bullet_count;
+
+      // 计算控制响应速度（跟踪误差）
+      double yaw_error = plan.control ? (plan.target_yaw - gs.yaw) : 0.0;
+      double pitch_error = plan.control ? (plan.target_pitch - gs.pitch) : 0.0;
+      double plan_yaw_error = plan.control ? (plan.yaw - gs.yaw) : 0.0;
+      double plan_pitch_error = plan.control ? (plan.pitch - gs.pitch) : 0.0;
 
       nlohmann::json data;
       data["t"] = tools::delta_time(std::chrono::steady_clock::now(), t0);
@@ -138,6 +161,14 @@ int main(int argc, char * argv[])
         data["w"] = 0.0;
       }
 
+      // 添加 FPS 和控制响应速度数据
+      data["fps"] = shared_fps.load();
+      data["plan_fps"] = plan_fps;
+      data["yaw_error"] = yaw_error;
+      data["pitch_error"] = pitch_error;
+      data["plan_yaw_error"] = plan_yaw_error;
+      data["plan_pitch_error"] = plan_pitch_error;
+
       plotter.plot(data);
 
       std::this_thread::sleep_for(10ms);
@@ -147,10 +178,27 @@ int main(int argc, char * argv[])
   cv::Mat img;
   std::chrono::steady_clock::time_point t;
 
+  // FPS 计算相关变量
+  auto fps_start_time = std::chrono::steady_clock::now();
+  int frame_count = 0;
+  double current_fps = 0.0;
+
   while (!exiter.exit()) {
+    auto frame_start = std::chrono::steady_clock::now();
+
     camera.read(img, t);
     auto q = gimbal.q(t);
     auto gs = gimbal.state();
+
+    // 计算 FPS
+    frame_count++;
+    auto fps_elapsed = std::chrono::duration<double>(frame_start - fps_start_time).count();
+    if (fps_elapsed >= 1.0) {
+      current_fps = frame_count / fps_elapsed;
+      frame_count = 0;
+      fps_start_time = frame_start;
+      shared_fps.store(current_fps);  // 更新共享变量供 plan_thread 使用
+    }
 
     // 记录当前帧的 q（用于 timing 验证）
     last_q = q;
@@ -220,6 +268,14 @@ int main(int argc, char * argv[])
       );
       visualizer.show("3D Coordinate System");
     }
+
+    // 在图像上显示 FPS 和状态信息
+    cv::putText(
+      img, fmt::format("FPS: {:.1f}", current_fps), cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8,
+      cv::Scalar(0, 255, 0), 2);
+    cv::putText(
+      img, fmt::format("Gimbal: yaw={:.2f} pitch={:.2f}", gs.yaw, gs.pitch), cv::Point(10, 60),
+      cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 0), 1);
 
     cv::resize(img, img, {}, 0.5, 0.5);  // 显示时缩小图片尺寸
     cv::imshow("reprojection", img);
